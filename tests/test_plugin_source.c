@@ -120,7 +120,7 @@ static void test_output_hook_drains_completed_before_processing_check(void)
     ASSERT_TRUE(audio_lock_branch != NULL);
     ASSERT_TRUE(audio_lock_branch < hook_end);
 
-    find_call = strstr(audio_lock_branch, "eq_audio_port_registry_find(&g_ports, port)");
+    find_call = strstr(audio_lock_branch, "eq_audio_port_registry_find_owned(&g_ports, owner_id, port)");
     ASSERT_TRUE(find_call != NULL);
     ASSERT_TRUE(find_call < hook_end);
 
@@ -259,9 +259,49 @@ static void test_unknown_port_recovery_reads_config_before_audio_lock(void)
     ASSERT_TRUE(lock_call < fn_end);
     ASSERT_TRUE(get_len < lock_call);
 
-    recover_call = strstr(lock_call, "eq_audio_port_registry_recover_config(&g_ports, port");
+    recover_call = strstr(lock_call, "eq_audio_port_registry_recover_config_owned(&g_ports, owner_id, port");
     ASSERT_TRUE(recover_call != NULL);
     ASSERT_TRUE(recover_call < fn_end);
+
+    free(source);
+}
+
+static void test_unknown_port_recovery_preserves_recovered_port_type_and_owner(void)
+{
+    char path[512];
+    char *source;
+    char *fn_start;
+    char *fn_end;
+
+    snprintf(path, sizeof(path), "%s/plugin/main.c", EQVITA_SOURCE_DIR);
+    source = read_file(path);
+
+    fn_start = strstr(source, "static int recover_port_config_after_output");
+    ASSERT_TRUE(fn_start != NULL);
+    fn_end = strstr(fn_start + 1, "static int sceAudioOutGetConfig_hook");
+    ASSERT_TRUE(fn_end != NULL);
+
+    ASSERT_TRUE(range_contains(fn_start, fn_end, "uint32_t owner_id = current_audio_owner_id();"));
+    ASSERT_TRUE(range_contains(fn_start, fn_end, "eq_audio_port_registry_recover_config_owned(&g_ports, owner_id, port, eq_audio_port_type_for_recovered_id(port)"));
+
+    free(source);
+}
+
+static void test_audio_hooks_use_process_owner_for_port_registry(void)
+{
+    char path[512];
+    char *source;
+
+    snprintf(path, sizeof(path), "%s/plugin/main.c", EQVITA_SOURCE_DIR);
+    source = read_file(path);
+
+    ASSERT_TRUE(strstr(source, "static uint32_t current_audio_owner_id(void)") != NULL);
+    ASSERT_TRUE(strstr(source, "ksceKernelGetProcessId()") != NULL);
+    ASSERT_TRUE(strstr(source, "eq_audio_port_registry_find_owned(&g_ports, owner_id, port)") != NULL);
+    ASSERT_TRUE(strstr(source, "eq_audio_port_registry_begin_processing_owned(&g_ports, owner_id, port)") != NULL);
+    ASSERT_TRUE(strstr(source, "eq_audio_port_registry_open_owned(&g_ports, owner_id, port") != NULL);
+    ASSERT_TRUE(strstr(source, "eq_audio_port_registry_set_config_owned(&g_ports, owner_id, port") != NULL);
+    ASSERT_TRUE(strstr(source, "eq_audio_port_registry_release_owned(&g_ports, owner_id, port)") != NULL);
 
     free(source);
 }
@@ -602,7 +642,7 @@ static void test_output_retry_guard_uses_processing_generation_directly(void)
 
     ASSERT_TRUE(!range_contains(error_guard, complete_call, "ret < 0 && (applied || retry_bypass)"));
     ASSERT_TRUE(range_contains(error_guard, complete_call, "eq_audio_tracked_port_note_output_error(processing_port, buf)"));
-    ASSERT_TRUE(!range_contains(error_guard, complete_call, "eq_audio_port_registry_find(&g_ports, port)"));
+    ASSERT_TRUE(!range_contains(error_guard, complete_call, "eq_audio_port_registry_find_owned(&g_ports, owner_id, port)"));
 
     free(source);
 }
@@ -1532,6 +1572,8 @@ int main(void)
     test_output_hook_recovers_when_returned_frames_disagree_with_tracked_config();
     test_output_hook_does_not_query_live_len_before_copying_audio();
     test_unknown_port_recovery_reads_config_before_audio_lock();
+    test_unknown_port_recovery_preserves_recovered_port_type_and_owner();
+    test_audio_hooks_use_process_owner_for_port_registry();
     test_unknown_port_recovery_rejects_negative_ports_before_get_config();
     test_output_hook_does_not_take_state_mutex_before_original_output();
     test_output_hook_updates_status_after_original_output();

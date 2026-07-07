@@ -2,6 +2,7 @@
 #include <psp2kern/kernel/sysmem.h>
 #include <psp2kern/kernel/cpu.h>
 #include <psp2kern/kernel/threadmgr.h>
+#include <psp2kern/kernel/threadmgr/misc.h>
 #include <psp2kern/ctrl.h>
 #include <taihen.h>
 #include <psp2/audioout.h>
@@ -117,6 +118,14 @@ static int hook_enter(void) {
 
 static void hook_leave(void) {
     __sync_sub_and_fetch(&g_active_callbacks, 1);
+}
+
+static uint32_t current_audio_owner_id(void) {
+    SceUID pid = ksceKernelGetProcessId();
+    if (pid < 0) {
+        return 0;
+    }
+    return (uint32_t)pid;
 }
 
 static void publish_control_locked(const eq_control_t *control) {
@@ -539,6 +548,7 @@ static void update_status(uint32_t sample_rate, eq_route_t route, int eq_active,
 }
 
 static int recover_port_config_after_output(int port) {
+    uint32_t owner_id = current_audio_owner_id();
     int len;
     int freq;
     int mode;
@@ -559,7 +569,7 @@ static int recover_port_config_after_output(int port) {
     if (try_lock_audio() < 0) {
         return -1;
     }
-    res = eq_audio_port_registry_recover_config(&g_ports, port, 0, (uint32_t)len, (uint32_t)freq, mode) ? 0 : -1;
+    res = eq_audio_port_registry_recover_config_owned(&g_ports, owner_id, port, eq_audio_port_type_for_recovered_id(port), (uint32_t)len, (uint32_t)freq, mode) ? 0 : -1;
     unlock_audio();
     return res;
 }
@@ -607,6 +617,7 @@ static int sceAudioOutOutput_hook(int port, const void *buf) {
     eq_control_t control;
     eq_audio_tracked_port_t *processing_port = NULL;
     eq_audio_port_config_t processing_config;
+    uint32_t owner_id = 0;
 #if EQVITA_AUDIO_DIAGNOSTICS
     eq_diag_port_meta_t diag_port_meta;
 #endif
@@ -636,6 +647,7 @@ static int sceAudioOutOutput_hook(int port, const void *buf) {
     }
 
     start_us = ksceKernelGetSystemTimeLow();
+    owner_id = current_audio_owner_id();
 
     memset(&control, 0, sizeof(control));
 #if EQVITA_AUDIO_DIAGNOSTICS
@@ -660,7 +672,7 @@ static int sceAudioOutOutput_hook(int port, const void *buf) {
         }
 
         eq_audio_port_registry_drain_completed(&g_ports);
-        p = eq_audio_port_registry_find(&g_ports, port);
+        p = eq_audio_port_registry_find_owned(&g_ports, owner_id, port);
         if (!p) {
             recover_after_output = 1;
         }
@@ -674,7 +686,7 @@ static int sceAudioOutOutput_hook(int port, const void *buf) {
             channels = p->config.channels;
             reason = EQ_BYPASS_AUDIO_BUSY;
         } else if (p && p->config.in_use) {
-            processing_port = eq_audio_port_registry_begin_processing(&g_ports, port);
+            processing_port = eq_audio_port_registry_begin_processing_owned(&g_ports, owner_id, port);
             if (processing_port) {
                 processing_config = processing_port->config;
 #if EQVITA_AUDIO_DIAGNOSTICS
@@ -935,16 +947,18 @@ static int sceAudioOutOpenPort_hook(int type, int len, int freq, int mode) {
     uint32_t generation = 0;
     uint32_t dirty_counter = 0;
     uint32_t channels = 0;
+    uint32_t owner_id = 0;
     if (!hook_enter()) {
         int port = TAI_CONTINUE(int, g_hook_open, type, len, freq, mode);
         hook_leave();
         return port;
     }
+    owner_id = current_audio_owner_id();
     int port = TAI_CONTINUE(int, g_hook_open, type, len, freq, mode);
     channels = (uint32_t)(eq_audio_mode_to_channels(mode) > 0 ? eq_audio_mode_to_channels(mode) : 0);
     if (g_processing_enabled && port >= 0) {
         if (lock_audio() >= 0) {
-            eq_audio_tracked_port_t *tracked = eq_audio_port_registry_open(&g_ports, port, (uint32_t)type, (uint32_t)len, (uint32_t)freq, mode);
+            eq_audio_tracked_port_t *tracked = eq_audio_port_registry_open_owned(&g_ports, owner_id, port, (uint32_t)type, (uint32_t)len, (uint32_t)freq, mode);
             if (tracked) {
                 generation = tracked->generation;
                 dirty_counter = tracked->last_dirty;
@@ -965,18 +979,20 @@ static int sceAudioOutSetConfig_hook(int port, SceSize len, int freq, int mode) 
     uint32_t final_len = (len == (SceSize)-1) ? 0 : (uint32_t)len;
     uint32_t final_freq = (freq < 0) ? 0 : (uint32_t)freq;
     uint32_t final_channels = (mode < 0 || eq_audio_mode_to_channels(mode) < 0) ? 0 : (uint32_t)eq_audio_mode_to_channels(mode);
+    uint32_t owner_id = 0;
     if (!hook_enter()) {
         int res = TAI_CONTINUE(int, g_hook_set_config, port, len, freq, mode);
         hook_leave();
         return res;
     }
+    owner_id = current_audio_owner_id();
     int res = TAI_CONTINUE(int, g_hook_set_config, port, len, freq, mode);
     if (g_processing_enabled && port >= 0 && res >= 0) {
         if (lock_audio() >= 0) {
             uint32_t len_arg = (len == (SceSize)-1) ? EQ_AUDIO_KEEP_U32 : (uint32_t)len;
-            (void)eq_audio_port_registry_set_config(&g_ports, port, len_arg, freq, mode);
+            (void)eq_audio_port_registry_set_config_owned(&g_ports, owner_id, port, len_arg, freq, mode);
             {
-                eq_audio_tracked_port_t *tracked = eq_audio_port_registry_find(&g_ports, port);
+                eq_audio_tracked_port_t *tracked = eq_audio_port_registry_find_owned(&g_ports, owner_id, port);
                 if (tracked) {
                     generation = tracked->generation;
                     port_type = tracked->config.type;
@@ -1002,15 +1018,17 @@ static int sceAudioOutReleasePort_hook(int port) {
     uint32_t len = 0;
     uint32_t freq = 0;
     uint32_t channels = 0;
+    uint32_t owner_id = 0;
     if (!hook_enter()) {
         int res = TAI_CONTINUE(int, g_hook_release, port);
         hook_leave();
         return res;
     }
+    owner_id = current_audio_owner_id();
     int res = TAI_CONTINUE(int, g_hook_release, port);
     if (g_processing_enabled && port >= 0 && res >= 0) {
         if (lock_audio() >= 0) {
-            eq_audio_tracked_port_t *tracked = eq_audio_port_registry_find(&g_ports, port);
+            eq_audio_tracked_port_t *tracked = eq_audio_port_registry_find_owned(&g_ports, owner_id, port);
             if (tracked) {
                 generation = tracked->generation;
                 port_type = tracked->config.type;
@@ -1019,7 +1037,7 @@ static int sceAudioOutReleasePort_hook(int port) {
                 freq = tracked->config.freq;
                 channels = tracked->config.channels;
             }
-            (void)eq_audio_port_registry_release(&g_ports, port);
+            (void)eq_audio_port_registry_release_owned(&g_ports, owner_id, port);
             unlock_audio();
         }
         diag_emit_lifecycle_now(EQ_DIAG_EVENT_PORT_RELEASE, port, generation, port_type,

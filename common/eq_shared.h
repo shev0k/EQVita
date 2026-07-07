@@ -5,7 +5,7 @@
 #include <string.h>
 
 #define EQ_VERSION_MAJOR 1
-#define EQ_VERSION_MINOR 13
+#define EQ_VERSION_MINOR 14
 #define EQ_VERSION_PATCH 0
 
 #define EQ_BANDS 10
@@ -19,6 +19,7 @@
 #define EQ_LEGACY_ABI_VERSION_1_10 EQ_VERSION_PACK(1, 10)
 #define EQ_LEGACY_ABI_VERSION_1_11 EQ_VERSION_PACK(1, 11)
 #define EQ_LEGACY_ABI_VERSION_1_12 EQ_VERSION_PACK(1, 12)
+#define EQ_LEGACY_ABI_VERSION_1_13 EQ_VERSION_PACK(1, 13)
 
 #define EQ_PRESET_MAGIC 0x50565145u /* EQVP */
 #define EQ_PRESET_VERSION 2u
@@ -399,7 +400,8 @@ static inline int eq_control_is_compatible(const eq_control_t *ctrl)
 
     if (ctrl->version == EQ_LEGACY_ABI_VERSION_1_10 ||
         ctrl->version == EQ_LEGACY_ABI_VERSION_1_11 ||
-        ctrl->version == EQ_LEGACY_ABI_VERSION_1_12) {
+        ctrl->version == EQ_LEGACY_ABI_VERSION_1_12 ||
+        ctrl->version == EQ_LEGACY_ABI_VERSION_1_13) {
         if (ctrl->size == sizeof(eq_control_t) || ctrl->size == sizeof(eq_shared_block_t)) {
             return 1;
         }

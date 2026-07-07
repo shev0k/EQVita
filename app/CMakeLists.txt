@@ -7,7 +7,7 @@ set(A_SELF eboot.bin)
 
 set(VITA_APP_NAME "EQ Vita")
 set(VITA_TITLEID "EQSP00001")
-set(VITA_VERSION "01.13")
+set(VITA_VERSION "01.14")
 
 add_executable("${A_NAME}"
   main.c

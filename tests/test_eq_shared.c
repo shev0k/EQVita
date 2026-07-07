@@ -47,6 +47,13 @@ static void test_defaults_are_compatible_and_safe(void) {
     ASSERT_TRUE(eq_control_is_compatible(&ctrl));
 }
 
+static void test_current_branch_uses_1_14_abi(void) {
+    ASSERT_EQ_U32(EQ_VERSION_MAJOR, 1);
+    ASSERT_EQ_U32(EQ_VERSION_MINOR, 14);
+    ASSERT_EQ_U32(EQ_VERSION_PATCH, 0);
+    ASSERT_EQ_U32(EQ_ABI_VERSION, EQ_VERSION_PACK(1, 14));
+}
+
 static void test_validation_rejects_wrong_abi(void) {
     eq_control_t ctrl;
     eq_control_init_defaults(&ctrl);
@@ -82,6 +89,18 @@ static void test_validation_accepts_1_11_control_files(void) {
     eq_control_init_defaults(&ctrl);
 
     ctrl.version = EQ_LEGACY_ABI_VERSION_1_11;
+    ctrl.route_hint = EQ_ROUTE_SPEAKER;
+
+    ASSERT_TRUE(eq_control_validate(&ctrl) == 0);
+    ASSERT_EQ_U32(ctrl.version, EQ_ABI_VERSION);
+    ASSERT_EQ_U32(ctrl.route_hint, EQ_ROUTE_UNKNOWN);
+}
+
+static void test_validation_accepts_1_13_control_files(void) {
+    eq_control_t ctrl;
+    eq_control_init_defaults(&ctrl);
+
+    ctrl.version = EQ_LEGACY_ABI_VERSION_1_13;
     ctrl.route_hint = EQ_ROUTE_SPEAKER;
 
     ASSERT_TRUE(eq_control_validate(&ctrl) == 0);
@@ -473,9 +492,11 @@ static void test_boot_state_assumes_speaker_when_enabled_route_unknown(void) {
 
 int main(void) {
     test_defaults_are_compatible_and_safe();
+    test_current_branch_uses_1_14_abi();
     test_validation_rejects_wrong_abi();
     test_validation_accepts_legacy_size_and_normalizes();
     test_validation_accepts_1_11_control_files();
+    test_validation_accepts_1_13_control_files();
     test_validation_normalizes_and_clamps();
     test_headroom_mode_is_encoded_without_changing_control_size();
     test_legacy_payload_resets_headroom_mode();

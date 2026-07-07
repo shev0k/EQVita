@@ -6,6 +6,9 @@
 
 static int failures;
 
+#define TEST_OWNER_A 0x1001u
+#define TEST_OWNER_B 0x2002u
+
 #define ASSERT_TRUE(expr) do { \
     if (!(expr)) { \
         printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #expr); \
@@ -67,6 +70,87 @@ static void test_sparse_port_config_and_release_use_port_id_lookup(void) {
     ASSERT_TRUE(eq_audio_port_registry_release(&registry, 256) == 0);
     ASSERT_TRUE(eq_audio_port_registry_find(&registry, 256) == NULL);
     ASSERT_EQ_U32(eq_audio_port_registry_count(&registry), 0);
+}
+
+static void test_same_port_id_can_be_tracked_for_different_owners(void) {
+    eq_audio_port_registry_t registry;
+    eq_audio_tracked_port_t *first;
+    eq_audio_tracked_port_t *second;
+
+    eq_audio_port_registry_init(&registry);
+
+    first = eq_audio_port_registry_open_owned(&registry, TEST_OWNER_A, 7, EQ_AUDIO_PORT_TYPE_MAIN, 256, 48000, EQ_AUDIO_MODE_STEREO);
+    second = eq_audio_port_registry_open_owned(&registry, TEST_OWNER_B, 7, EQ_AUDIO_PORT_TYPE_MAIN, 512, 48000, EQ_AUDIO_MODE_STEREO);
+
+    ASSERT_TRUE(first != NULL);
+    ASSERT_TRUE(second != NULL);
+    ASSERT_TRUE(first != second);
+    ASSERT_EQ_U32(first->owner_id, TEST_OWNER_A);
+    ASSERT_EQ_U32(second->owner_id, TEST_OWNER_B);
+    ASSERT_EQ_U32(first->config.len, 256);
+    ASSERT_EQ_U32(second->config.len, 512);
+    ASSERT_TRUE(eq_audio_port_registry_find_owned(&registry, TEST_OWNER_A, 7) == first);
+    ASSERT_TRUE(eq_audio_port_registry_find_owned(&registry, TEST_OWNER_B, 7) == second);
+    ASSERT_EQ_U32(eq_audio_port_registry_count(&registry), 2);
+}
+
+static void test_releasing_one_owner_keeps_same_port_for_other_owner(void) {
+    eq_audio_port_registry_t registry;
+    eq_audio_tracked_port_t *first;
+    eq_audio_tracked_port_t *second;
+
+    eq_audio_port_registry_init(&registry);
+
+    first = eq_audio_port_registry_open_owned(&registry, TEST_OWNER_A, 7, EQ_AUDIO_PORT_TYPE_MAIN, 256, 48000, EQ_AUDIO_MODE_STEREO);
+    second = eq_audio_port_registry_open_owned(&registry, TEST_OWNER_B, 7, EQ_AUDIO_PORT_TYPE_MAIN, 512, 48000, EQ_AUDIO_MODE_STEREO);
+    ASSERT_TRUE(first != NULL);
+    ASSERT_TRUE(second != NULL);
+
+    ASSERT_EQ_I32(eq_audio_port_registry_release_owned(&registry, TEST_OWNER_A, 7), 0);
+
+    ASSERT_TRUE(eq_audio_port_registry_find_owned(&registry, TEST_OWNER_A, 7) == NULL);
+    ASSERT_TRUE(eq_audio_port_registry_find_owned(&registry, TEST_OWNER_B, 7) == second);
+    ASSERT_EQ_U32(second->config.len, 512);
+    ASSERT_EQ_U32(eq_audio_port_registry_count(&registry), 1);
+}
+
+static void test_registry_tracks_bgm_after_all_main_ports_are_open(void) {
+    eq_audio_port_registry_t registry;
+    eq_audio_tracked_port_t *bgm;
+
+    eq_audio_port_registry_init(&registry);
+
+    for (int i = 0; i < 8; ++i) {
+        ASSERT_TRUE(eq_audio_port_registry_open_owned(&registry, TEST_OWNER_A, i, EQ_AUDIO_PORT_TYPE_MAIN, 256, 48000, EQ_AUDIO_MODE_STEREO) != NULL);
+    }
+
+    bgm = eq_audio_port_registry_open_owned(&registry, TEST_OWNER_A, EQ_AUDIO_BGM_PORT_ID, EQ_AUDIO_PORT_TYPE_BGM, 2048, 48000, EQ_AUDIO_MODE_STEREO);
+
+    ASSERT_TRUE(bgm != NULL);
+    ASSERT_EQ_I32(bgm->port_id, EQ_AUDIO_BGM_PORT_ID);
+    ASSERT_EQ_U32(bgm->owner_id, TEST_OWNER_A);
+    ASSERT_EQ_U32(bgm->config.type, EQ_AUDIO_PORT_TYPE_BGM);
+    ASSERT_EQ_U32(eq_audio_port_registry_count(&registry), 9);
+}
+
+static void test_recovered_bgm_port_keeps_bgm_type(void) {
+    eq_audio_port_registry_t registry;
+    eq_audio_tracked_port_t *slot;
+
+    eq_audio_port_registry_init(&registry);
+
+    slot = eq_audio_port_registry_recover_config_owned(&registry,
+                                                       TEST_OWNER_A,
+                                                       EQ_AUDIO_BGM_PORT_ID,
+                                                       eq_audio_port_type_for_recovered_id(EQ_AUDIO_BGM_PORT_ID),
+                                                       2048,
+                                                       48000,
+                                                       EQ_AUDIO_MODE_STEREO);
+
+    ASSERT_TRUE(slot != NULL);
+    ASSERT_EQ_I32(slot->port_id, EQ_AUDIO_BGM_PORT_ID);
+    ASSERT_EQ_U32(slot->owner_id, TEST_OWNER_A);
+    ASSERT_EQ_U32(slot->config.type, EQ_AUDIO_PORT_TYPE_BGM);
 }
 
 static void test_begin_processing_allows_different_ports_but_rejects_same_port_reentry(void) {
@@ -576,6 +660,10 @@ static void test_retry_bypass_ignores_null_buffers(void) {
 int main(void) {
     test_sparse_port_id_is_tracked_without_using_id_as_array_index();
     test_sparse_port_config_and_release_use_port_id_lookup();
+    test_same_port_id_can_be_tracked_for_different_owners();
+    test_releasing_one_owner_keeps_same_port_for_other_owner();
+    test_registry_tracks_bgm_after_all_main_ports_are_open();
+    test_recovered_bgm_port_keeps_bgm_type();
     test_begin_processing_allows_different_ports_but_rejects_same_port_reentry();
     test_release_defers_reset_until_processing_finishes();
     test_release_pending_slot_is_not_reused_while_processing();

@@ -3,6 +3,10 @@
 #include <stdint.h>
 
 #define EQ_AUDIO_KEEP_U32 UINT32_MAX
+#define EQ_AUDIO_PORT_TYPE_MAIN 0u
+#define EQ_AUDIO_PORT_TYPE_BGM 1u
+#define EQ_AUDIO_PORT_TYPE_VOICE 2u
+#define EQ_AUDIO_BGM_PORT_ID 256
 #define EQ_AUDIO_MODE_MONO 0
 #define EQ_AUDIO_MODE_STEREO 1
 #define EQ_AUDIO_MIN_LEN 64u
@@ -28,6 +32,14 @@ static inline int eq_audio_mode_to_channels(int mode)
         return 2;
     }
     return -1;
+}
+
+static inline uint32_t eq_audio_port_type_for_recovered_id(int port_id)
+{
+    if (port_id == EQ_AUDIO_BGM_PORT_ID) {
+        return EQ_AUDIO_PORT_TYPE_BGM;
+    }
+    return EQ_AUDIO_PORT_TYPE_MAIN;
 }
 
 static inline int eq_audio_freq_supported(uint32_t freq)

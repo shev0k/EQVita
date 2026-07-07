@@ -6,12 +6,13 @@
 #include "dsp.h"
 #include "port_state.h"
 
-#define EQ_AUDIO_MAX_TRACKED_PORTS 8
+#define EQ_AUDIO_MAX_TRACKED_PORTS 16
 #define EQ_AUDIO_PORT_ID_UNUSED (-1)
 #define EQ_AUDIO_SCRATCH_MAX_FRAMES 4096
 
 typedef struct eq_audio_tracked_port
 {
+    uint32_t owner_id;
     int port_id;
     eq_audio_port_config_t config;
     eq_dsp_state_t dsp;
@@ -127,14 +128,19 @@ static inline uint32_t eq_audio_port_registry_take_generation(eq_audio_port_regi
     return generation;
 }
 
-static inline eq_audio_tracked_port_t *eq_audio_port_registry_find(eq_audio_port_registry_t *registry, int port_id)
+static inline eq_audio_tracked_port_t *eq_audio_port_registry_find_owned(eq_audio_port_registry_t *registry,
+                                                                         uint32_t owner_id,
+                                                                         int port_id)
 {
     if (!registry) {
         return NULL;
     }
 
     for (int i = 0; i < EQ_AUDIO_MAX_TRACKED_PORTS; ++i) {
-        if (registry->slots[i].port_id == port_id && registry->slots[i].config.in_use && !registry->slots[i].release_pending) {
+        if (registry->slots[i].owner_id == owner_id &&
+            registry->slots[i].port_id == port_id &&
+            registry->slots[i].config.in_use &&
+            !registry->slots[i].release_pending) {
             return &registry->slots[i];
         }
     }
@@ -142,10 +148,17 @@ static inline eq_audio_tracked_port_t *eq_audio_port_registry_find(eq_audio_port
     return NULL;
 }
 
+static inline eq_audio_tracked_port_t *eq_audio_port_registry_find(eq_audio_port_registry_t *registry, int port_id)
+{
+    return eq_audio_port_registry_find_owned(registry, 0u, port_id);
+}
+
 static inline void eq_audio_port_registry_end_processing(eq_audio_tracked_port_t *slot);
 static inline void eq_audio_port_registry_drain_completed(eq_audio_port_registry_t *registry);
 
-static inline eq_audio_tracked_port_t *eq_audio_port_registry_alloc(eq_audio_port_registry_t *registry, int port_id)
+static inline eq_audio_tracked_port_t *eq_audio_port_registry_alloc_owned(eq_audio_port_registry_t *registry,
+                                                                          uint32_t owner_id,
+                                                                          int port_id)
 {
     eq_audio_tracked_port_t *processing_match = NULL;
 
@@ -155,7 +168,10 @@ static inline eq_audio_tracked_port_t *eq_audio_port_registry_alloc(eq_audio_por
 
     for (int i = 0; i < EQ_AUDIO_MAX_TRACKED_PORTS; ++i) {
         eq_audio_tracked_port_t *slot = &registry->slots[i];
-        if (slot->port_id == port_id && slot->config.in_use && !slot->release_pending) {
+        if (slot->owner_id == owner_id &&
+            slot->port_id == port_id &&
+            slot->config.in_use &&
+            !slot->release_pending) {
             if (slot->processing) {
                 processing_match = slot;
                 break;
@@ -170,12 +186,18 @@ static inline eq_audio_tracked_port_t *eq_audio_port_registry_alloc(eq_audio_por
                 processing_match->release_pending = 1;
             }
             eq_audio_tracked_port_reset(&registry->slots[i]);
+            registry->slots[i].owner_id = owner_id;
             registry->slots[i].port_id = port_id;
             return &registry->slots[i];
         }
     }
 
     return NULL;
+}
+
+static inline eq_audio_tracked_port_t *eq_audio_port_registry_alloc(eq_audio_port_registry_t *registry, int port_id)
+{
+    return eq_audio_port_registry_alloc_owned(registry, 0u, port_id);
 }
 
 static inline void eq_audio_tracked_port_apply_config(eq_audio_tracked_port_t *slot,
@@ -203,12 +225,13 @@ static inline void eq_audio_tracked_port_apply_config(eq_audio_tracked_port_t *s
     }
 }
 
-static inline eq_audio_tracked_port_t *eq_audio_port_registry_open(eq_audio_port_registry_t *registry,
-                                                                   int port_id,
-                                                                   uint32_t type,
-                                                                   uint32_t len,
-                                                                   uint32_t freq,
-                                                                   int mode)
+static inline eq_audio_tracked_port_t *eq_audio_port_registry_open_owned(eq_audio_port_registry_t *registry,
+                                                                         uint32_t owner_id,
+                                                                         int port_id,
+                                                                         uint32_t type,
+                                                                         uint32_t len,
+                                                                         uint32_t freq,
+                                                                         int mode)
 {
     eq_audio_tracked_port_t *slot;
     eq_audio_port_config_t config;
@@ -220,13 +243,14 @@ static inline eq_audio_tracked_port_t *eq_audio_port_registry_open(eq_audio_port
     }
 
     eq_audio_port_registry_drain_completed(registry);
-    slot = eq_audio_port_registry_alloc(registry, port_id);
+    slot = eq_audio_port_registry_alloc_owned(registry, owner_id, port_id);
     if (!slot) {
         return NULL;
     }
 
     generation = eq_audio_port_registry_take_generation(registry);
     eq_audio_tracked_port_reset(slot);
+    slot->owner_id = owner_id;
     slot->port_id = port_id;
     slot->generation = generation;
     slot->config = config;
@@ -236,17 +260,28 @@ static inline eq_audio_tracked_port_t *eq_audio_port_registry_open(eq_audio_port
     return slot;
 }
 
-static inline int eq_audio_port_registry_set_config(eq_audio_port_registry_t *registry,
-                                                    int port_id,
-                                                    uint32_t len,
-                                                    int freq,
-                                                    int mode)
+static inline eq_audio_tracked_port_t *eq_audio_port_registry_open(eq_audio_port_registry_t *registry,
+                                                                   int port_id,
+                                                                   uint32_t type,
+                                                                   uint32_t len,
+                                                                   uint32_t freq,
+                                                                   int mode)
 {
-    eq_audio_tracked_port_t *slot = eq_audio_port_registry_find(registry, port_id);
+    return eq_audio_port_registry_open_owned(registry, 0u, port_id, type, len, freq, mode);
+}
+
+static inline int eq_audio_port_registry_set_config_owned(eq_audio_port_registry_t *registry,
+                                                          uint32_t owner_id,
+                                                          int port_id,
+                                                          uint32_t len,
+                                                          int freq,
+                                                          int mode)
+{
+    eq_audio_tracked_port_t *slot;
     eq_audio_port_config_t next_config;
 
     eq_audio_port_registry_drain_completed(registry);
-    slot = eq_audio_port_registry_find(registry, port_id);
+    slot = eq_audio_port_registry_find_owned(registry, owner_id, port_id);
     if (!slot) {
         return -1;
     }
@@ -271,12 +306,22 @@ static inline int eq_audio_port_registry_set_config(eq_audio_port_registry_t *re
     return 0;
 }
 
-static inline eq_audio_tracked_port_t *eq_audio_port_registry_recover_config(eq_audio_port_registry_t *registry,
-                                                                             int port_id,
-                                                                             uint32_t type,
-                                                                             uint32_t len,
-                                                                             uint32_t freq,
-                                                                             int mode)
+static inline int eq_audio_port_registry_set_config(eq_audio_port_registry_t *registry,
+                                                    int port_id,
+                                                    uint32_t len,
+                                                    int freq,
+                                                    int mode)
+{
+    return eq_audio_port_registry_set_config_owned(registry, 0u, port_id, len, freq, mode);
+}
+
+static inline eq_audio_tracked_port_t *eq_audio_port_registry_recover_config_owned(eq_audio_port_registry_t *registry,
+                                                                                   uint32_t owner_id,
+                                                                                   int port_id,
+                                                                                   uint32_t type,
+                                                                                   uint32_t len,
+                                                                                   uint32_t freq,
+                                                                                   int mode)
 {
     eq_audio_tracked_port_t *slot;
     eq_audio_port_config_t next_config;
@@ -286,9 +331,9 @@ static inline eq_audio_tracked_port_t *eq_audio_port_registry_recover_config(eq_
     }
 
     eq_audio_port_registry_drain_completed(registry);
-    slot = eq_audio_port_registry_find(registry, port_id);
+    slot = eq_audio_port_registry_find_owned(registry, owner_id, port_id);
     if (!slot) {
-        return eq_audio_port_registry_open(registry, port_id, type, len, freq, mode);
+        return eq_audio_port_registry_open_owned(registry, owner_id, port_id, type, len, freq, mode);
     }
 
     next_config = slot->config;
@@ -306,12 +351,24 @@ static inline eq_audio_tracked_port_t *eq_audio_port_registry_recover_config(eq_
     return slot;
 }
 
-static inline int eq_audio_port_registry_release(eq_audio_port_registry_t *registry, int port_id)
+static inline eq_audio_tracked_port_t *eq_audio_port_registry_recover_config(eq_audio_port_registry_t *registry,
+                                                                             int port_id,
+                                                                             uint32_t type,
+                                                                             uint32_t len,
+                                                                             uint32_t freq,
+                                                                             int mode)
+{
+    return eq_audio_port_registry_recover_config_owned(registry, 0u, port_id, type, len, freq, mode);
+}
+
+static inline int eq_audio_port_registry_release_owned(eq_audio_port_registry_t *registry,
+                                                       uint32_t owner_id,
+                                                       int port_id)
 {
     eq_audio_tracked_port_t *slot;
 
     eq_audio_port_registry_drain_completed(registry);
-    slot = eq_audio_port_registry_find(registry, port_id);
+    slot = eq_audio_port_registry_find_owned(registry, owner_id, port_id);
     if (!slot) {
         return -1;
     }
@@ -325,12 +382,19 @@ static inline int eq_audio_port_registry_release(eq_audio_port_registry_t *regis
     return 0;
 }
 
-static inline eq_audio_tracked_port_t *eq_audio_port_registry_begin_processing(eq_audio_port_registry_t *registry, int port_id)
+static inline int eq_audio_port_registry_release(eq_audio_port_registry_t *registry, int port_id)
+{
+    return eq_audio_port_registry_release_owned(registry, 0u, port_id);
+}
+
+static inline eq_audio_tracked_port_t *eq_audio_port_registry_begin_processing_owned(eq_audio_port_registry_t *registry,
+                                                                                    uint32_t owner_id,
+                                                                                    int port_id)
 {
     eq_audio_tracked_port_t *slot;
 
     eq_audio_port_registry_drain_completed(registry);
-    slot = eq_audio_port_registry_find(registry, port_id);
+    slot = eq_audio_port_registry_find_owned(registry, owner_id, port_id);
     if (!slot || slot->processing) {
         return NULL;
     }
@@ -338,6 +402,11 @@ static inline eq_audio_tracked_port_t *eq_audio_port_registry_begin_processing(e
     slot->processing = 1;
     slot->processing_complete = 0;
     return slot;
+}
+
+static inline eq_audio_tracked_port_t *eq_audio_port_registry_begin_processing(eq_audio_port_registry_t *registry, int port_id)
+{
+    return eq_audio_port_registry_begin_processing_owned(registry, 0u, port_id);
 }
 
 static inline void eq_audio_port_registry_mark_processing_complete(eq_audio_tracked_port_t *slot)
