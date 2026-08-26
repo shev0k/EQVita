@@ -87,6 +87,8 @@ int main(void)
     ok &= expect_order(app_main, "#define ABOUT_ROW_LOG_FILE 2", "#define ABOUT_ROW_WHAT 3");
     ok &= expect_order(app_main, "\"GitHub: shev0k/EQVita\"", "\"Log file\"");
     ok &= expect_order(app_main, "\"Log file\"", "\"What it does\"");
+    ok &= expect_contains(app_main, "\"Save or import APO profiles\"");
+    ok &= expect_contains(app_main, "\"10-band or imported parametric EQ\"");
 
     free(app_main);
     return ok ? 0 : 1;

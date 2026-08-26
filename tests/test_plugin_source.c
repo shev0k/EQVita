@@ -466,7 +466,7 @@ static void test_output_hook_times_pre_output_preparation(void)
     free(source);
 }
 
-static void test_route_detection_gates_controller_headphone_probe(void)
+static void test_route_detection_throttles_wired_without_new_kernel_dependencies(void)
 {
     char path[512];
     char *source;
@@ -484,8 +484,7 @@ static void test_route_detection_gates_controller_headphone_probe(void)
 
     helper_start = strstr(source, "static int should_probe_wired_headphone");
     ASSERT_TRUE(helper_start != NULL);
-    ASSERT_TRUE(strstr(helper_start, "EQ_ROUTE_SPEAKER") != NULL);
-    ASSERT_TRUE(strstr(helper_start, "EQ_ROUTE_UNKNOWN") != NULL);
+    ASSERT_TRUE(strstr(helper_start, "return 1") != NULL);
 
     ASSERT_TRUE(strstr(source, "EQ_WIRED_HEADPHONE_PROBE_INTERVAL") != NULL);
     countdown_decl = strstr(source, "static uint32_t g_wired_headphone_probe_countdown");
@@ -510,8 +509,53 @@ static void test_route_detection_gates_controller_headphone_probe(void)
     ASSERT_TRUE(probe_guard != NULL);
     ASSERT_TRUE(probe_guard < probe_call);
     ASSERT_TRUE(strstr(detect_start, "wired_headphones_connected = g_cached_wired_headphones_connected") != NULL);
+    ASSERT_TRUE(strstr(source, "SceBtForDriver") == NULL);
+    ASSERT_TRUE(strstr(source, "ksceBt") == NULL);
+    ASSERT_TRUE(strstr(source, "route_probe_thread") == NULL);
+    ASSERT_TRUE(range_contains(detect_start, detect_end, "eq_route_select(route_hint"));
+
+    {
+        char *hook_start = strstr(source, "static int sceAudioOutOutput_hook");
+        char *hook_end = strstr(hook_start + 1, "static int sceAudioOutOpenPort_hook");
+        ASSERT_TRUE(hook_start != NULL);
+        ASSERT_TRUE(hook_end != NULL);
+        ASSERT_TRUE(!range_contains(hook_start, hook_end, "ksceBt"));
+    }
 
     free(source);
+}
+
+static void test_output_route_profiles_are_atomic_and_exported(void)
+{
+    char path[512];
+    char *source;
+    char *exports;
+    char *hook_start;
+    char *hook_end;
+
+    snprintf(path, sizeof(path), "%s/plugin/main.c", EQVITA_SOURCE_DIR);
+    source = read_file(path);
+    ASSERT_TRUE(strstr(source, "static eq_route_profile_bank_t g_route_profiles") != NULL);
+    ASSERT_TRUE(strstr(source, "publish_route_profiles_locked") != NULL);
+    ASSERT_TRUE(strstr(source, "copy_route_profile_snapshot") != NULL);
+    ASSERT_TRUE(strstr(source, "int EqSetRouteProfiles") != NULL);
+    ASSERT_TRUE(strstr(source, "load_route_profiles_kernel") != NULL);
+
+    hook_start = strstr(source, "static int sceAudioOutOutput_hook");
+    ASSERT_TRUE(hook_start != NULL);
+    hook_end = strstr(hook_start + 1, "static int sceAudioOutOpenPort_hook");
+    ASSERT_TRUE(hook_end != NULL);
+    ASSERT_TRUE(range_contains(hook_start, hook_end, "copy_route_profile_snapshot"));
+    ASSERT_TRUE(range_contains(hook_start, hook_end, "EQ_BYPASS_NO_ROUTE_PROFILE"));
+    ASSERT_TRUE(range_contains(hook_start, hook_end, "&control"));
+    ASSERT_TRUE(strstr(source, "eq_route_profile_bank_t route_control") == NULL);
+    ASSERT_TRUE(strstr(source, "g_route_profiles_staging") != NULL);
+    free(source);
+
+    snprintf(path, sizeof(path), "%s/plugin/exports.yml", EQVITA_SOURCE_DIR);
+    exports = read_file(path);
+    ASSERT_TRUE(strstr(exports, "- EqSetRouteProfiles") != NULL);
+    free(exports);
 }
 
 static void test_output_hook_does_not_update_route_stale_counter_per_block(void)
@@ -978,15 +1022,17 @@ static void test_kernel_boot_preset_reads_require_exact_file_size(void)
     boot_end = strstr(boot_start + 1, "static void load_preset_kernel");
     ASSERT_TRUE(boot_end != NULL);
     ASSERT_TRUE(range_contains(boot_start, boot_end, "kernel_read_exact(fd, &state, sizeof(state))"));
+    ASSERT_TRUE(range_contains(boot_start, boot_end, "kernel_read_exact(fd, &legacy_state, sizeof(legacy_state))"));
     ASSERT_TRUE(!range_contains(boot_start, boot_end, "ksceIoRead(fd, &state"));
 
     preset_start = boot_end;
     preset_end = strstr(preset_start + 1, "static void set_defaults");
     ASSERT_TRUE(preset_end != NULL);
     ASSERT_TRUE(range_contains(preset_start, preset_end, "kernel_read_exact(fd, &preset, sizeof(preset))"));
-    ASSERT_TRUE(range_contains(preset_start, preset_end, "kernel_read_exact(fd, &tmp, sizeof(tmp))"));
+    ASSERT_TRUE(range_contains(preset_start, preset_end, "kernel_read_exact(fd, &legacy_preset, sizeof(legacy_preset))"));
+    ASSERT_TRUE(range_contains(preset_start, preset_end, "kernel_read_exact(fd, &legacy, sizeof(legacy))"));
     ASSERT_TRUE(!range_contains(preset_start, preset_end, "ksceIoRead(fd, &preset"));
-    ASSERT_TRUE(!range_contains(preset_start, preset_end, "ksceIoRead(fd, &tmp"));
+    ASSERT_TRUE(!range_contains(preset_start, preset_end, "ksceIoRead(fd, &legacy"));
 
     free(source);
 }
@@ -1258,16 +1304,16 @@ static void test_dsp_smoothing_scratch_arrays_are_not_declared_inside_frame_loop
     ASSERT_TRUE(frame_loop != NULL);
     ASSERT_TRUE(frame_loop < fn_end);
 
-    smooth_band_decl = strstr(fn_start, "eq_biquad_t smooth_band[EQ_BANDS]");
+    smooth_band_decl = strstr(fn_start, "eq_biquad_t smooth_band[EQ_PARAMETRIC_FILTERS]");
     ASSERT_TRUE(smooth_band_decl != NULL);
     ASSERT_TRUE(smooth_band_decl < frame_loop);
 
-    smooth_enabled_decl = strstr(fn_start, "uint8_t smooth_band_enabled[EQ_BANDS]");
+    smooth_enabled_decl = strstr(fn_start, "uint8_t smooth_band_enabled[EQ_PARAMETRIC_FILTERS]");
     ASSERT_TRUE(smooth_enabled_decl != NULL);
     ASSERT_TRUE(smooth_enabled_decl < frame_loop);
 
-    ASSERT_TRUE(!range_contains(frame_loop, fn_end, "eq_biquad_t smooth_band[EQ_BANDS]"));
-    ASSERT_TRUE(!range_contains(frame_loop, fn_end, "uint8_t smooth_band_enabled[EQ_BANDS]"));
+    ASSERT_TRUE(!range_contains(frame_loop, fn_end, "eq_biquad_t smooth_band[EQ_PARAMETRIC_FILTERS]"));
+    ASSERT_TRUE(!range_contains(frame_loop, fn_end, "uint8_t smooth_band_enabled[EQ_PARAMETRIC_FILTERS]"));
 
     free(source);
 }
@@ -1292,8 +1338,9 @@ static void test_dsp_steady_state_band_loop_avoids_smoothing_branch_work(void)
     steady_end = strstr(generic_start + 1, "void eq_dsp_apply_to");
     ASSERT_TRUE(steady_end != NULL);
 
-    ASSERT_TRUE(range_contains(stereo_start, steady_end, "for (uint8_t i = 0; i < active_count; ++i)"));
-    ASSERT_TRUE(range_contains(stereo_start, steady_end, "active_band_index"));
+    ASSERT_TRUE(range_contains(stereo_start, steady_end,
+                               "for (uint8_t operation = 0; operation < state->active_operation_count; ++operation)"));
+    ASSERT_TRUE(range_contains(stereo_start, steady_end, "active_operation_type"));
     ASSERT_TRUE(!range_contains(stereo_start, steady_end, "smoothing_now"));
     ASSERT_TRUE(!range_contains(stereo_start, steady_end, "smooth_band"));
 
@@ -1579,7 +1626,8 @@ int main(void)
     test_output_hook_updates_status_after_original_output();
     test_output_hook_marks_failed_original_output_inactive_before_status();
     test_output_hook_times_pre_output_preparation();
-    test_route_detection_gates_controller_headphone_probe();
+    test_route_detection_throttles_wired_without_new_kernel_dependencies();
+    test_output_route_profiles_are_atomic_and_exported();
     test_output_hook_does_not_update_route_stale_counter_per_block();
     test_output_hook_uses_cached_control_if_snapshot_is_busy();
     test_output_hook_bypasses_same_buffer_retry_only_when_buffer_may_still_be_processed();

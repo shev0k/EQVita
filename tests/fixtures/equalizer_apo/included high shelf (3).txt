@@ -1,0 +1,2 @@
+# Synthetic included shelf with an omitted Q value.
+Filter: ON HS Fc 10000 Hz Gain -2 dB

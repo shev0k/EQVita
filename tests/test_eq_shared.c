@@ -47,11 +47,107 @@ static void test_defaults_are_compatible_and_safe(void) {
     ASSERT_TRUE(eq_control_is_compatible(&ctrl));
 }
 
-static void test_current_branch_uses_1_14_abi(void) {
+static void test_current_branch_uses_1_16_abi(void) {
     ASSERT_EQ_U32(EQ_VERSION_MAJOR, 1);
-    ASSERT_EQ_U32(EQ_VERSION_MINOR, 14);
+    ASSERT_EQ_U32(EQ_VERSION_MINOR, 16);
     ASSERT_EQ_U32(EQ_VERSION_PATCH, 0);
-    ASSERT_EQ_U32(EQ_ABI_VERSION, EQ_VERSION_PACK(1, 14));
+    ASSERT_EQ_U32(EQ_ABI_VERSION, EQ_VERSION_PACK(1, 16));
+}
+
+static void test_route_profile_bank_maps_all_three_outputs(void) {
+    eq_route_profile_bank_t bank;
+
+    eq_route_profile_bank_init(&bank);
+    ASSERT_TRUE(eq_route_profile_bank_is_compatible(&bank));
+    ASSERT_EQ_U32(bank.enabled_mask, 0);
+    ASSERT_EQ_I32(eq_route_profile_index(EQ_ROUTE_SPEAKER), 0);
+    ASSERT_EQ_I32(eq_route_profile_index(EQ_ROUTE_HEADPHONES), 1);
+    ASSERT_EQ_I32(eq_route_profile_index(EQ_ROUTE_BLUETOOTH), 2);
+    ASSERT_EQ_U32(eq_route_profile_bit(EQ_ROUTE_SPEAKER), 1);
+    ASSERT_EQ_U32(eq_route_profile_bit(EQ_ROUTE_HEADPHONES), 2);
+    ASSERT_EQ_U32(eq_route_profile_bit(EQ_ROUTE_BLUETOOTH), 4);
+
+    bank.enabled_mask = eq_route_profile_bit(EQ_ROUTE_SPEAKER) |
+                        eq_route_profile_bit(EQ_ROUTE_BLUETOOTH);
+    bank.selected_route = EQ_ROUTE_BLUETOOTH;
+    bank.profiles[0].speaker_only = 1;
+    bank.profiles[2].preamp_mdB = -16800;
+    ASSERT_TRUE(eq_route_profile_bank_validate(&bank) == 0);
+    ASSERT_TRUE(eq_route_profile_bank_has_route(&bank, EQ_ROUTE_SPEAKER));
+    ASSERT_TRUE(!eq_route_profile_bank_has_route(&bank, EQ_ROUTE_HEADPHONES));
+    ASSERT_TRUE(eq_route_profile_bank_has_route(&bank, EQ_ROUTE_BLUETOOTH));
+    ASSERT_EQ_U32(bank.profiles[0].speaker_only, 0);
+    ASSERT_EQ_U32(bank.profiles[2].enabled, 1);
+    ASSERT_EQ_I32(bank.profiles[2].preamp_mdB, -16800);
+}
+
+static void test_route_profile_file_round_trips_names_and_curves(void) {
+    eq_route_profile_bank_t bank;
+    eq_route_profile_bank_t loaded;
+    eq_route_profile_file_t file;
+    char names[EQ_ROUTE_PROFILE_COUNT][EQ_ROUTE_PROFILE_SOURCE_NAME_MAX] = {{0}};
+    char loaded_names[EQ_ROUTE_PROFILE_COUNT][EQ_ROUTE_PROFILE_SOURCE_NAME_MAX] = {{0}};
+
+    eq_route_profile_bank_init(&bank);
+    bank.enabled_mask = eq_route_profile_bit(EQ_ROUTE_SPEAKER) |
+                        eq_route_profile_bit(EQ_ROUTE_HEADPHONES) |
+                        eq_route_profile_bit(EQ_ROUTE_BLUETOOTH);
+    bank.selected_route = EQ_ROUTE_HEADPHONES;
+    eq_control_set_parametric_mode(&bank.profiles[0], 1);
+    bank.profiles[0].preamp_mdB = -5000;
+    bank.profiles[0].parametric_filters[0].type = EQ_FILTER_PEAK;
+    bank.profiles[0].parametric_filters[0].channel_mask = EQ_CHANNEL_STEREO_MASK;
+    bank.profiles[0].parametric_filters[0].data.filter.frequency_mHz = 889000;
+    bank.profiles[0].parametric_filters[0].data.filter.gain_mdB = -5770;
+    bank.profiles[0].parametric_filters[0].data.filter.q_uQ = 687000;
+    snprintf(names[0], sizeof(names[0]), "pch-1000.txt");
+    snprintf(names[1], sizeof(names[1]), "headphones/my-iem.txt");
+    snprintf(names[2], sizeof(names[2]), "bluetooth/speaker.txt");
+
+    eq_route_profile_file_build(&file, &bank, names);
+    ASSERT_TRUE(eq_route_profile_file_extract(&file, &loaded, loaded_names) == 0);
+    ASSERT_EQ_U32(loaded.enabled_mask, 7);
+    ASSERT_EQ_U32(loaded.selected_route, EQ_ROUTE_HEADPHONES);
+    ASSERT_EQ_I32(loaded.profiles[0].preamp_mdB, -5000);
+    ASSERT_EQ_U32(loaded.profiles[0].parametric_filters[0].data.filter.frequency_mHz, 889000);
+    ASSERT_TRUE(strcmp(loaded_names[0], "pch-1000.txt") == 0);
+    ASSERT_TRUE(strcmp(loaded_names[1], "headphones/my-iem.txt") == 0);
+    ASSERT_TRUE(strcmp(loaded_names[2], "bluetooth/speaker.txt") == 0);
+
+    file.source_names[0][0] ^= 1;
+    ASSERT_TRUE(eq_route_profile_file_extract(&file, &loaded, loaded_names) < 0);
+}
+
+static void test_v1_15_wrapped_state_upgrades_without_losing_parametric_eq(void) {
+    eq_control_t control;
+    eq_control_t loaded;
+    eq_preset_file_t preset;
+    eq_boot_state_file_t boot;
+
+    eq_control_init_defaults(&control);
+    eq_control_set_parametric_mode(&control, 1);
+    control.enabled = 1;
+    control.preamp_mdB = -9600;
+    control.parametric_filters[0].type = EQ_FILTER_PEAK;
+    control.parametric_filters[0].channel_mask = EQ_CHANNEL_STEREO_MASK;
+    control.parametric_filters[0].data.filter.frequency_mHz = 3896000;
+    control.parametric_filters[0].data.filter.gain_mdB = 12500;
+    control.parametric_filters[0].data.filter.q_uQ = 782000;
+
+    eq_preset_build(&preset, &control);
+    preset.control.version = EQ_LEGACY_ABI_VERSION_1_15;
+    preset.checksum = eq_preset_checksum(&preset);
+    ASSERT_TRUE(eq_preset_extract_control(&preset, &loaded) == 0);
+    ASSERT_EQ_U32(loaded.version, EQ_ABI_VERSION);
+    ASSERT_EQ_I32(loaded.preamp_mdB, -9600);
+    ASSERT_EQ_U32(loaded.parametric_filters[0].data.filter.frequency_mHz, 3896000);
+
+    eq_boot_state_build(&boot, &control);
+    boot.control.version = EQ_LEGACY_ABI_VERSION_1_15;
+    boot.checksum = eq_boot_state_checksum(&boot);
+    ASSERT_TRUE(eq_boot_state_extract_control(&boot, &loaded) == 0);
+    ASSERT_EQ_U32(loaded.version, EQ_ABI_VERSION);
+    ASSERT_EQ_I32(loaded.parametric_filters[0].data.filter.gain_mdB, 12500);
 }
 
 static void test_validation_rejects_wrong_abi(void) {
@@ -66,17 +162,20 @@ static void test_validation_rejects_wrong_abi(void) {
     ASSERT_TRUE(eq_control_validate(&ctrl) < 0);
 }
 
-static void test_validation_accepts_legacy_size_and_normalizes(void) {
+static void test_legacy_1_10_control_import_normalizes(void) {
+    eq_legacy_control_v1_14_t legacy;
     eq_control_t ctrl;
-    eq_control_init_defaults(&ctrl);
 
-    ctrl.version = EQ_LEGACY_ABI_VERSION_1_10;
-    ctrl.size = sizeof(eq_shared_block_t);
-    ctrl.enabled = 7;
-    ctrl.route_hint = EQ_ROUTE_SPEAKER;
-    ctrl.band_gain_mdB[2] = EQ_MAX_ABS_GAIN_MDB + 1;
+    memset(&legacy, 0, sizeof(legacy));
+    legacy.version = EQ_LEGACY_ABI_VERSION_1_10;
+    legacy.size = EQ_LEGACY_SHARED_BLOCK_SIZE;
+    legacy.enabled = 7;
+    legacy.speaker_only = 1;
+    legacy.hpf_enabled = 1;
+    legacy.route_hint = EQ_ROUTE_SPEAKER;
+    legacy.band_gain_mdB[2] = EQ_MAX_ABS_GAIN_MDB + 1;
 
-    ASSERT_TRUE(eq_control_validate(&ctrl) == 0);
+    ASSERT_TRUE(eq_control_import_legacy(&ctrl, &legacy) == 0);
     ASSERT_EQ_U32(ctrl.version, EQ_ABI_VERSION);
     ASSERT_EQ_U32(ctrl.size, sizeof(eq_control_t));
     ASSERT_EQ_U32(ctrl.enabled, 1);
@@ -84,28 +183,36 @@ static void test_validation_accepts_legacy_size_and_normalizes(void) {
     ASSERT_EQ_I32(ctrl.band_gain_mdB[2], EQ_MAX_ABS_GAIN_MDB);
 }
 
-static void test_validation_accepts_1_11_control_files(void) {
+static void test_legacy_1_11_control_imports(void) {
+    eq_legacy_control_v1_14_t legacy;
     eq_control_t ctrl;
-    eq_control_init_defaults(&ctrl);
 
-    ctrl.version = EQ_LEGACY_ABI_VERSION_1_11;
-    ctrl.route_hint = EQ_ROUTE_SPEAKER;
+    memset(&legacy, 0, sizeof(legacy));
+    legacy.version = EQ_LEGACY_ABI_VERSION_1_11;
+    legacy.size = EQ_LEGACY_CONTROL_SIZE;
+    legacy.speaker_only = 1;
+    legacy.route_hint = EQ_ROUTE_SPEAKER;
 
-    ASSERT_TRUE(eq_control_validate(&ctrl) == 0);
+    ASSERT_TRUE(eq_control_import_legacy(&ctrl, &legacy) == 0);
     ASSERT_EQ_U32(ctrl.version, EQ_ABI_VERSION);
     ASSERT_EQ_U32(ctrl.route_hint, EQ_ROUTE_UNKNOWN);
 }
 
-static void test_validation_accepts_1_13_control_files(void) {
+static void test_legacy_1_14_control_preserves_route_and_headroom(void) {
+    eq_legacy_control_v1_14_t legacy;
     eq_control_t ctrl;
-    eq_control_init_defaults(&ctrl);
 
-    ctrl.version = EQ_LEGACY_ABI_VERSION_1_13;
-    ctrl.route_hint = EQ_ROUTE_SPEAKER;
+    memset(&legacy, 0, sizeof(legacy));
+    legacy.version = EQ_LEGACY_ABI_VERSION_1_14;
+    legacy.size = EQ_LEGACY_CONTROL_SIZE;
+    legacy.speaker_only = 1;
+    legacy.route_hint = EQ_ROUTE_BLUETOOTH;
+    legacy.hpf_enabled = (uint8_t)(EQ_HEADROOM_LOUD << EQ_HEADROOM_MODE_SHIFT);
 
-    ASSERT_TRUE(eq_control_validate(&ctrl) == 0);
+    ASSERT_TRUE(eq_control_import_legacy(&ctrl, &legacy) == 0);
     ASSERT_EQ_U32(ctrl.version, EQ_ABI_VERSION);
-    ASSERT_EQ_U32(ctrl.route_hint, EQ_ROUTE_UNKNOWN);
+    ASSERT_EQ_U32(ctrl.route_hint, EQ_ROUTE_BLUETOOTH);
+    ASSERT_EQ_U32(eq_control_get_headroom_mode(&ctrl), EQ_HEADROOM_LOUD);
 }
 
 static void test_validation_normalizes_and_clamps(void) {
@@ -123,18 +230,20 @@ static void test_validation_normalizes_and_clamps(void) {
     ASSERT_TRUE(eq_control_validate(&ctrl) == 0);
     ASSERT_EQ_U32(ctrl.enabled, 1);
     ASSERT_EQ_U32(ctrl.speaker_only, 1);
-    ASSERT_EQ_U32(ctrl.hpf_enabled, 1);
+    ASSERT_EQ_U32(eq_control_hpf_enabled(&ctrl), 0);
     ASSERT_EQ_U32(ctrl.route_hint, EQ_ROUTE_UNKNOWN);
     ASSERT_EQ_I32(ctrl.preamp_mdB, EQ_MAX_ABS_GAIN_MDB);
     ASSERT_EQ_I32(ctrl.band_gain_mdB[0], -EQ_MAX_ABS_GAIN_MDB);
     ASSERT_EQ_I32(ctrl.band_gain_mdB[1], EQ_MAX_ABS_GAIN_MDB);
 }
 
-static void test_headroom_mode_is_encoded_without_changing_control_size(void) {
+static void test_headroom_mode_and_control_layout(void) {
     eq_control_t ctrl;
     eq_control_init_defaults(&ctrl);
 
-    ASSERT_EQ_U32(sizeof(ctrl), 60);
+    ASSERT_EQ_U32(sizeof(eq_legacy_control_v1_14_t), EQ_LEGACY_CONTROL_SIZE);
+    ASSERT_EQ_U32(sizeof(eq_parametric_filter_t), 16);
+    ASSERT_EQ_U32(sizeof(ctrl), EQ_CONTROL_SIZE_V1_15);
 
     eq_control_set_headroom_mode(&ctrl, EQ_HEADROOM_LOUD);
     ASSERT_EQ_U32(eq_control_hpf_enabled(&ctrl), 1);
@@ -150,13 +259,16 @@ static void test_headroom_mode_is_encoded_without_changing_control_size(void) {
 }
 
 static void test_legacy_payload_resets_headroom_mode(void) {
+    eq_legacy_control_v1_14_t legacy;
     eq_control_t ctrl;
-    eq_control_init_defaults(&ctrl);
 
-    eq_control_set_headroom_mode(&ctrl, EQ_HEADROOM_RAW);
-    ctrl.version = EQ_LEGACY_ABI_VERSION_1_12;
+    memset(&legacy, 0, sizeof(legacy));
+    legacy.version = EQ_LEGACY_ABI_VERSION_1_12;
+    legacy.size = EQ_LEGACY_CONTROL_SIZE;
+    legacy.speaker_only = 1;
+    legacy.hpf_enabled = (uint8_t)(EQ_HEADROOM_RAW << EQ_HEADROOM_MODE_SHIFT);
 
-    ASSERT_TRUE(eq_control_validate(&ctrl) == 0);
+    ASSERT_TRUE(eq_control_import_legacy(&ctrl, &legacy) == 0);
     ASSERT_EQ_U32(eq_control_get_headroom_mode(&ctrl), EQ_HEADROOM_SAFE);
 }
 
@@ -199,6 +311,53 @@ static void test_loud_and_raw_headroom_modes_remain_explicit(void) {
 
     eq_control_set_headroom_mode(&ctrl, EQ_HEADROOM_RAW);
     ASSERT_EQ_I32(eq_control_effective_preamp_mdB(&ctrl, bands), 0);
+
+    ctrl.preamp_mdB = -16800;
+    eq_control_set_headroom_mode(&ctrl, EQ_HEADROOM_EXACT);
+    ASSERT_EQ_I32(eq_control_effective_preamp_mdB(&ctrl, bands), -16800);
+}
+
+static void test_parametric_validation_and_exclusive_processing(void) {
+    eq_control_t ctrl;
+    eq_parametric_filter_t *peak;
+    eq_parametric_filter_t *copy;
+
+    eq_control_init_defaults(&ctrl);
+    eq_control_set_parametric_mode(&ctrl, 2);
+    ctrl.preamp_mdB = 0;
+    ctrl.band_gain_mdB[2] = 7000;
+    eq_control_set_hpf_enabled(&ctrl, 1);
+    eq_control_set_headroom_mode(&ctrl, EQ_HEADROOM_SAFE);
+    peak = &ctrl.parametric_filters[0];
+    peak->type = EQ_FILTER_PEAK;
+    peak->channel_mask = 0xff;
+    peak->shape = EQ_FILTER_SHAPE_S;
+    peak->frequency_mode = EQ_FILTER_FREQUENCY_CORNER;
+    peak->data.filter.frequency_mHz = 0;
+    peak->data.filter.gain_mdB = 30000;
+    peak->data.filter.q_uQ = 0;
+    copy = &ctrl.parametric_filters[1];
+    copy->type = EQ_FILTER_COPY;
+    copy->data.copy.matrix[0] = EQ_COPY_COEFFICIENT_SCALE;
+    copy->data.copy.matrix[3] = EQ_COPY_COEFFICIENT_SCALE;
+    copy->data.copy.reserved = 99;
+
+    ASSERT_TRUE(eq_control_validate(&ctrl) == 0);
+    ASSERT_EQ_U32(peak->channel_mask, EQ_CHANNEL_STEREO_MASK);
+    ASSERT_EQ_U32(peak->shape, EQ_FILTER_SHAPE_Q);
+    ASSERT_EQ_U32(peak->frequency_mode, EQ_FILTER_FREQUENCY_CENTER);
+    ASSERT_EQ_U32(peak->data.filter.frequency_mHz, EQ_PARAMETRIC_MIN_FREQUENCY_MHZ);
+    ASSERT_EQ_I32(peak->data.filter.gain_mdB, EQ_PARAMETRIC_MAX_ABS_GAIN_MDB);
+    ASSERT_EQ_U32(peak->data.filter.q_uQ, EQ_PARAMETRIC_MIN_Q_UQ);
+    ASSERT_EQ_U32(copy->channel_mask, EQ_CHANNEL_STEREO_MASK);
+    ASSERT_EQ_U32(copy->data.copy.reserved, 0);
+    for (int i = 0; i < EQ_BANDS; ++i) {
+        ASSERT_EQ_I32(ctrl.band_gain_mdB[i], 0);
+    }
+    ASSERT_EQ_U32(eq_control_hpf_enabled(&ctrl), 0);
+    ASSERT_EQ_U32(eq_control_get_headroom_mode(&ctrl), EQ_HEADROOM_EXACT);
+    ASSERT_EQ_I32(eq_control_effective_preamp_mdB(&ctrl, ctrl.band_gain_mdB),
+                  0);
 }
 
 static void test_route_hint_selection_persists_for_global_audio(void) {
@@ -412,23 +571,59 @@ static void test_preset_wrapper_round_trips_and_detects_corruption(void) {
 }
 
 static void test_preset_wrapper_imports_legacy_control_version(void) {
+    eq_control_t loaded;
+    eq_legacy_preset_file_v2_t preset;
+
+    memset(&preset, 0, sizeof(preset));
+    preset.magic = EQ_PRESET_MAGIC;
+    preset.version = EQ_LEGACY_PRESET_VERSION;
+    preset.header_size = (uint32_t)offsetof(eq_legacy_preset_file_v2_t, control);
+    preset.payload_size = sizeof(eq_legacy_control_v1_14_t);
+    preset.band_count = EQ_PRESET_BAND_COUNT;
+    preset.control.version = EQ_LEGACY_ABI_VERSION_1_12;
+    preset.control.size = EQ_LEGACY_CONTROL_SIZE;
+    preset.control.enabled = 1;
+    preset.control.speaker_only = 1;
+    preset.control.hpf_enabled = 1;
+    preset.control.band_gain_mdB[1] = 4000;
+    preset.checksum = eq_legacy_preset_checksum(&preset);
+
+    ASSERT_TRUE(eq_legacy_preset_extract_control(&preset, &loaded) == 0);
+    ASSERT_EQ_U32(loaded.version, EQ_ABI_VERSION);
+    ASSERT_EQ_U32(loaded.enabled, 1);
+    ASSERT_EQ_I32(loaded.band_gain_mdB[1], 4000);
+    ASSERT_EQ_U32(eq_control_get_headroom_mode(&loaded), EQ_HEADROOM_SAFE);
+}
+
+static void test_parametric_preset_round_trip(void) {
     eq_control_t ctrl;
     eq_control_t loaded;
     eq_preset_file_t preset;
 
     eq_control_init_defaults(&ctrl);
-    ctrl.enabled = 1;
-    ctrl.band_gain_mdB[1] = 4000;
+    eq_control_set_parametric_mode(&ctrl, 2);
+    ctrl.preamp_mdB = -13900;
+    eq_control_set_headroom_mode(&ctrl, EQ_HEADROOM_EXACT);
+    ctrl.parametric_filters[0].type = EQ_FILTER_LOW_SHELF;
+    ctrl.parametric_filters[0].channel_mask = EQ_CHANNEL_STEREO_MASK;
+    ctrl.parametric_filters[0].shape = EQ_FILTER_SHAPE_S;
+    ctrl.parametric_filters[0].frequency_mode = EQ_FILTER_FREQUENCY_CENTER;
+    ctrl.parametric_filters[0].data.filter.frequency_mHz = 59570;
+    ctrl.parametric_filters[0].data.filter.gain_mdB = 5400;
+    ctrl.parametric_filters[0].data.filter.q_uQ = 900000;
+    ctrl.parametric_filters[1].type = EQ_FILTER_COPY;
+    ctrl.parametric_filters[1].data.copy.matrix[0] = -EQ_COPY_COEFFICIENT_SCALE;
+    ctrl.parametric_filters[1].data.copy.matrix[3] = -EQ_COPY_COEFFICIENT_SCALE;
 
     eq_preset_build(&preset, &ctrl);
-    preset.control.version = EQ_LEGACY_ABI_VERSION_1_12;
-    preset.checksum = eq_preset_checksum(&preset);
-
     ASSERT_TRUE(eq_preset_extract_control(&preset, &loaded) == 0);
-    ASSERT_EQ_U32(loaded.version, EQ_ABI_VERSION);
-    ASSERT_EQ_U32(loaded.enabled, 1);
-    ASSERT_EQ_I32(loaded.band_gain_mdB[1], 4000);
-    ASSERT_EQ_U32(eq_control_get_headroom_mode(&loaded), EQ_HEADROOM_SAFE);
+    ASSERT_EQ_U32(loaded.eq_mode, EQ_MODE_PARAMETRIC);
+    ASSERT_EQ_U32(loaded.parametric_filter_count, 2);
+    ASSERT_EQ_I32(loaded.preamp_mdB, -13900);
+    ASSERT_EQ_U32(eq_control_get_headroom_mode(&loaded), EQ_HEADROOM_EXACT);
+    ASSERT_EQ_U32(loaded.parametric_filters[0].data.filter.frequency_mHz, 59570);
+    ASSERT_EQ_I32(loaded.parametric_filters[1].data.copy.matrix[0],
+                  -EQ_COPY_COEFFICIENT_SCALE);
 }
 
 static void test_preset_rejects_checksum_valid_invalid_control(void) {
@@ -492,17 +687,21 @@ static void test_boot_state_assumes_speaker_when_enabled_route_unknown(void) {
 
 int main(void) {
     test_defaults_are_compatible_and_safe();
-    test_current_branch_uses_1_14_abi();
+    test_current_branch_uses_1_16_abi();
+    test_route_profile_bank_maps_all_three_outputs();
+    test_route_profile_file_round_trips_names_and_curves();
+    test_v1_15_wrapped_state_upgrades_without_losing_parametric_eq();
     test_validation_rejects_wrong_abi();
-    test_validation_accepts_legacy_size_and_normalizes();
-    test_validation_accepts_1_11_control_files();
-    test_validation_accepts_1_13_control_files();
+    test_legacy_1_10_control_import_normalizes();
+    test_legacy_1_11_control_imports();
+    test_legacy_1_14_control_preserves_route_and_headroom();
     test_validation_normalizes_and_clamps();
-    test_headroom_mode_is_encoded_without_changing_control_size();
+    test_headroom_mode_and_control_layout();
     test_legacy_payload_resets_headroom_mode();
     test_safe_headroom_reserves_largest_positive_band();
     test_safe_headroom_keeps_user_cut_when_it_is_safer();
     test_loud_and_raw_headroom_modes_remain_explicit();
+    test_parametric_validation_and_exclusive_processing();
     test_route_hint_selection_persists_for_global_audio();
     test_dirty_counter_advance_never_publishes_zero();
     test_clip_event_counter_saturates();
@@ -512,6 +711,7 @@ int main(void) {
     test_legacy_preset_fallback_only_when_new_missing();
     test_preset_wrapper_round_trips_and_detects_corruption();
     test_preset_wrapper_imports_legacy_control_version();
+    test_parametric_preset_round_trip();
     test_preset_rejects_checksum_valid_invalid_control();
     test_boot_state_preserves_route_hint_and_round_trips();
     test_boot_state_assumes_speaker_when_enabled_route_unknown();

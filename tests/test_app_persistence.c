@@ -92,6 +92,52 @@ static void write_preset_control(const char *dir, int slot, const eq_control_t *
     write_file_or_die(path, &preset, sizeof(preset));
 }
 
+static eq_legacy_control_v1_14_t make_legacy_control(void)
+{
+    eq_legacy_control_v1_14_t legacy;
+    memset(&legacy, 0, sizeof(legacy));
+    legacy.version = EQ_LEGACY_ABI_VERSION_1_14;
+    legacy.size = EQ_LEGACY_CONTROL_SIZE;
+    legacy.enabled = 1;
+    legacy.speaker_only = 1;
+    legacy.hpf_enabled = (uint8_t)(1u | (EQ_HEADROOM_LOUD << EQ_HEADROOM_MODE_SHIFT));
+    legacy.route_hint = EQ_ROUTE_HEADPHONES;
+    legacy.preamp_mdB = -7000;
+    legacy.band_gain_mdB[2] = 4500;
+    return legacy;
+}
+
+static void write_legacy_boot_control(const char *dir)
+{
+    char path[256];
+    eq_legacy_boot_state_file_v1_t state;
+    memset(&state, 0, sizeof(state));
+    state.magic = EQ_BOOT_STATE_MAGIC;
+    state.version = EQ_LEGACY_BOOT_STATE_VERSION;
+    state.header_size = (uint32_t)offsetof(eq_legacy_boot_state_file_v1_t, control);
+    state.payload_size = sizeof(eq_legacy_control_v1_14_t);
+    state.control = make_legacy_control();
+    state.checksum = eq_legacy_boot_state_checksum(&state);
+    path_join(path, sizeof(path), dir, "boot.eqbs");
+    write_file_or_die(path, &state, sizeof(state));
+}
+
+static void write_legacy_preset_wrapper(const char *dir, int slot)
+{
+    char path[256];
+    eq_legacy_preset_file_v2_t preset;
+    memset(&preset, 0, sizeof(preset));
+    preset.magic = EQ_PRESET_MAGIC;
+    preset.version = EQ_LEGACY_PRESET_VERSION;
+    preset.header_size = (uint32_t)offsetof(eq_legacy_preset_file_v2_t, control);
+    preset.payload_size = sizeof(eq_legacy_control_v1_14_t);
+    preset.band_count = EQ_PRESET_BAND_COUNT;
+    preset.control = make_legacy_control();
+    preset.checksum = eq_legacy_preset_checksum(&preset);
+    snprintf(path, sizeof(path), "%s/preset%d.eqvp", dir, slot);
+    write_file_or_die(path, &preset, sizeof(preset));
+}
+
 static int read_preset_control(const char *dir, int slot, eq_control_t *out)
 {
     char path[256];
@@ -147,6 +193,59 @@ static void test_startup_load_prefers_boot_state_over_preset0(void)
     ASSERT_EQ_I32(loaded.enabled, 0);
     ASSERT_EQ_I32(loaded.band_gain_mdB[1], 4500);
     ASSERT_EQ_I32(eq_control_get_headroom_mode(&loaded), EQ_HEADROOM_LOUD);
+    free(dir);
+}
+
+static void test_legacy_boot_and_preset_wrappers_migrate(void)
+{
+    char *dir = make_temp_dir();
+    eq_control_t loaded;
+    int legacy_loaded = 0;
+
+    write_legacy_boot_control(dir);
+    ASSERT_TRUE(eqvita_load_boot_state(dir, &loaded) == 0);
+    ASSERT_EQ_I32(loaded.version, EQ_ABI_VERSION);
+    ASSERT_EQ_I32(loaded.band_gain_mdB[2], 4500);
+    ASSERT_EQ_I32(eq_control_get_headroom_mode(&loaded), EQ_HEADROOM_LOUD);
+    ASSERT_EQ_I32(loaded.eq_mode, EQ_MODE_GRAPHIC);
+
+    write_legacy_preset_wrapper(dir, 1);
+    ASSERT_TRUE(eqvita_load_preset(dir, 1, &loaded, &legacy_loaded) == 0);
+    ASSERT_EQ_I32(legacy_loaded, 1);
+    ASSERT_EQ_I32(loaded.band_gain_mdB[2], 4500);
+    ASSERT_EQ_I32(loaded.parametric_filter_count, 0);
+    free(dir);
+}
+
+static void test_parametric_preset_persists_all_operations(void)
+{
+    char *dir = make_temp_dir();
+    eq_control_t control;
+    eq_control_t loaded;
+    int legacy_loaded = 1;
+
+    eq_control_init_defaults(&control);
+    eq_control_set_parametric_mode(&control, 2);
+    control.preamp_mdB = -16800;
+    eq_control_set_headroom_mode(&control, EQ_HEADROOM_EXACT);
+    control.parametric_filters[0].type = EQ_FILTER_PEAK;
+    control.parametric_filters[0].channel_mask = EQ_CHANNEL_LEFT_MASK;
+    control.parametric_filters[0].data.filter.frequency_mHz = 6800000;
+    control.parametric_filters[0].data.filter.gain_mdB = -8000;
+    control.parametric_filters[0].data.filter.q_uQ = 4708300;
+    control.parametric_filters[1].type = EQ_FILTER_COPY;
+    control.parametric_filters[1].data.copy.matrix[0] = -EQ_COPY_COEFFICIENT_SCALE;
+    control.parametric_filters[1].data.copy.matrix[3] = -EQ_COPY_COEFFICIENT_SCALE;
+
+    ASSERT_TRUE(eqvita_save_preset(dir, 2, &control) == 0);
+    ASSERT_TRUE(eqvita_load_preset(dir, 2, &loaded, &legacy_loaded) == 0);
+    ASSERT_EQ_I32(legacy_loaded, 0);
+    ASSERT_EQ_I32(loaded.eq_mode, EQ_MODE_PARAMETRIC);
+    ASSERT_EQ_I32(loaded.parametric_filter_count, 2);
+    ASSERT_EQ_I32(loaded.preamp_mdB, -16800);
+    ASSERT_EQ_I32(loaded.parametric_filters[0].channel_mask, EQ_CHANNEL_LEFT_MASK);
+    ASSERT_EQ_I32(loaded.parametric_filters[1].data.copy.matrix[0],
+                  -EQ_COPY_COEFFICIENT_SCALE);
     free(dir);
 }
 
@@ -359,9 +458,92 @@ static void test_log_append_rotates_when_cap_is_exceeded(void)
     free(dir);
 }
 
+static void test_peq_directory_is_created_under_data_dir(void)
+{
+    static const char bundled[] = "Preamp: -5 dB\n";
+    static const char user_edit[] = "Preamp: -7 dB\n";
+    char *parent = make_temp_dir();
+    char data_dir[256];
+    char peq_dir[256];
+    char source_path[256];
+    char seeded_path[256];
+    char readback[64];
+    FILE *file;
+    struct stat st;
+
+    path_join(data_dir, sizeof(data_dir), parent, "eqvita");
+    path_join(peq_dir, sizeof(peq_dir), data_dir, EQVITA_PEQ_DIR_NAME);
+    path_join(source_path, sizeof(source_path), parent, "bundled.txt");
+    path_join(seeded_path, sizeof(seeded_path), peq_dir, "pch-1000.txt");
+    write_file_or_die(source_path, bundled, sizeof(bundled) - 1);
+    ASSERT_TRUE(eqvita_ensure_peq_dir(data_dir) == 0);
+    ASSERT_TRUE(stat(data_dir, &st) == 0 && S_ISDIR(st.st_mode));
+    ASSERT_TRUE(stat(peq_dir, &st) == 0 && S_ISDIR(st.st_mode));
+    ASSERT_TRUE(eqvita_ensure_peq_dir(data_dir) == 0);
+    ASSERT_TRUE(eqvita_seed_peq_file(data_dir, "pch-1000.txt", source_path) == 0);
+    write_file_or_die(seeded_path, user_edit, sizeof(user_edit) - 1);
+    ASSERT_TRUE(eqvita_seed_peq_file(data_dir, "pch-1000.txt", source_path) == 1);
+    memset(readback, 0, sizeof(readback));
+    file = fopen(seeded_path, "rb");
+    ASSERT_TRUE(file != NULL);
+    if (file) {
+        ASSERT_TRUE(fread(readback, 1, sizeof(user_edit) - 1, file) == sizeof(user_edit) - 1);
+        ASSERT_TRUE(fclose(file) == 0);
+    }
+    ASSERT_TRUE(memcmp(readback, user_edit, sizeof(user_edit) - 1) == 0);
+    ASSERT_TRUE(eqvita_seed_peq_file(data_dir, "../escape.txt", source_path) < 0);
+    ASSERT_TRUE(unlink(seeded_path) == 0);
+    ASSERT_TRUE(unlink(source_path) == 0);
+    ASSERT_TRUE(rmdir(peq_dir) == 0);
+    ASSERT_TRUE(rmdir(data_dir) == 0);
+    ASSERT_TRUE(rmdir(parent) == 0);
+    free(parent);
+}
+
+static void test_output_peq_profiles_persist_atomically(void)
+{
+    char *dir = make_temp_dir();
+    char path[256];
+    eq_route_profile_bank_t bank;
+    eq_route_profile_bank_t loaded;
+    char names[EQ_ROUTE_PROFILE_COUNT][EQ_ROUTE_PROFILE_SOURCE_NAME_MAX] = {{0}};
+    char loaded_names[EQ_ROUTE_PROFILE_COUNT][EQ_ROUTE_PROFILE_SOURCE_NAME_MAX] = {{0}};
+
+    eq_route_profile_bank_init(&bank);
+    bank.enabled_mask = eq_route_profile_bit(EQ_ROUTE_SPEAKER) |
+                        eq_route_profile_bit(EQ_ROUTE_BLUETOOTH);
+    bank.selected_route = EQ_ROUTE_BLUETOOTH;
+    eq_control_set_parametric_mode(&bank.profiles[0], 1);
+    bank.profiles[0].preamp_mdB = -5000;
+    bank.profiles[0].parametric_filters[0].type = EQ_FILTER_PEAK;
+    bank.profiles[0].parametric_filters[0].channel_mask = EQ_CHANNEL_STEREO_MASK;
+    bank.profiles[0].parametric_filters[0].data.filter.frequency_mHz = 889000;
+    bank.profiles[0].parametric_filters[0].data.filter.gain_mdB = -5770;
+    bank.profiles[0].parametric_filters[0].data.filter.q_uQ = 687000;
+    snprintf(names[0], sizeof(names[0]), "pch-1000.txt");
+    snprintf(names[2], sizeof(names[2]), "living-room.txt");
+
+    ASSERT_TRUE(eqvita_load_route_profiles(dir, &loaded, loaded_names) < 0);
+    ASSERT_TRUE(eqvita_save_route_profiles(dir, &bank, names) == 0);
+    ASSERT_TRUE(eqvita_load_route_profiles(dir, &loaded, loaded_names) == 0);
+    ASSERT_EQ_I32(loaded.enabled_mask, 5);
+    ASSERT_EQ_I32(loaded.selected_route, EQ_ROUTE_BLUETOOTH);
+    ASSERT_EQ_I32(loaded.profiles[0].preamp_mdB, -5000);
+    ASSERT_TRUE(strcmp(loaded_names[0], "pch-1000.txt") == 0);
+    ASSERT_TRUE(strcmp(loaded_names[2], "living-room.txt") == 0);
+
+    path_join(path, sizeof(path), dir, EQVITA_OUTPUT_PEQ_NAME);
+    ASSERT_TRUE(file_size_or_neg1(path) == (long)sizeof(eq_route_profile_file_t));
+    ASSERT_TRUE(unlink(path) == 0);
+    ASSERT_TRUE(rmdir(dir) == 0);
+    free(dir);
+}
+
 int main(void)
 {
     test_startup_load_prefers_boot_state_over_preset0();
+    test_legacy_boot_and_preset_wrappers_migrate();
+    test_parametric_preset_persists_all_operations();
     test_startup_load_falls_back_to_preset0_without_writing();
     test_startup_load_uses_defaults_without_writing();
     test_atomic_preset_save_preserves_old_file_when_temp_write_fails();
@@ -371,5 +553,7 @@ int main(void)
     test_app_startup_keeps_legacy_boot_state_when_no_active_slot_exists();
     test_preset_with_trailing_bytes_is_rejected();
     test_log_append_rotates_when_cap_is_exceeded();
+    test_peq_directory_is_created_under_data_dir();
+    test_output_peq_profiles_persist_atomically();
     return failures ? 1 : 0;
 }

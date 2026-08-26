@@ -1,0 +1,14 @@
+# Sony PS Vita PCH-1000 built-in speaker PEQ
+# Derived from a UMIK-1 very-close-mic measurement of the left speaker.
+# The left-derived correction is applied to both speakers.
+# Fit range: 800-7000 Hz using a 1/6-octave-smoothed response.
+# The high shelf is deliberately modest; it cannot restore the steep >7 kHz roll-off.
+
+Preamp: -5.0 dB
+Channel: L R
+Filter 1: ON PK Fc 889 Hz Gain -5.77 dB Q 0.687
+Filter 2: ON PK Fc 2262 Hz Gain 1.78 dB Q 3.500
+Filter 3: ON PK Fc 3156 Hz Gain -1.64 dB Q 4.000
+Filter 4: ON PK Fc 6000 Hz Gain 5.16 dB Q 1.845
+Filter 5: ON PK Fc 6447 Hz Gain -6.47 dB Q 5.000
+Filter 6: ON HSC Fc 7500 Hz Gain 4.50 dB Q 0.707

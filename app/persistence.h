@@ -3,11 +3,14 @@
 #include "../common/eq_shared.h"
 
 #define EQVITA_DATA_DIR "ur0:data/eqvita"
+#define EQVITA_PEQ_DIR_NAME "peq"
+#define EQVITA_PEQ_DIR EQVITA_DATA_DIR "/" EQVITA_PEQ_DIR_NAME
 #define EQVITA_BOOT_STATE_NAME "boot.eqbs"
 #define EQVITA_PRESET_NAME_FMT "preset%d.eqvp"
 #define EQVITA_LEGACY_PRESET_NAME_FMT "preset%d.bin"
 #define EQVITA_THEME_NAME "theme.cfg"
 #define EQVITA_ACTIVE_SLOT_NAME "active_slot.cfg"
+#define EQVITA_OUTPUT_PEQ_NAME EQ_ROUTE_PROFILE_FILE_NAME
 #define EQVITA_APP_LOG_NAME "app.log"
 #define EQVITA_APP_LOG_BACKUP_NAME "app.log.1"
 #define EQVITA_APP_LOG_MAX_BYTES (256u * 1024u)
@@ -37,3 +40,13 @@ int eqvita_load_active_preset_slot(const char *dir, int slot_count, int default_
 int eqvita_save_active_preset_slot(const char *dir, int slot);
 int eqvita_append_log_line(const char *dir, const char *line);
 int eqvita_build_data_path(char *out, unsigned int out_size, const char *dir, const char *name);
+int eqvita_ensure_peq_dir(const char *dir);
+int eqvita_seed_peq_file(const char *dir, const char *name, const char *source_path);
+int eqvita_load_route_profiles(
+    const char *dir,
+    eq_route_profile_bank_t *out_bank,
+    char out_source_names[EQ_ROUTE_PROFILE_COUNT][EQ_ROUTE_PROFILE_SOURCE_NAME_MAX]);
+int eqvita_save_route_profiles(
+    const char *dir,
+    const eq_route_profile_bank_t *bank,
+    const char source_names[EQ_ROUTE_PROFILE_COUNT][EQ_ROUTE_PROFILE_SOURCE_NAME_MAX]);

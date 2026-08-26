@@ -190,9 +190,9 @@ static void test_first_non_default_targets_snap_without_smoothing(void) {
 
     target_preamp = dsp.target_preamp;
     ASSERT_EQ_I32(dsp.smooth_remaining, 0);
-    ASSERT_EQ_I32(dsp.active_band_enabled[0], 1);
-    ASSERT_EQ_I32(dsp.active_band_enabled[1], 1);
-    ASSERT_EQ_I32(dsp.active_band_enabled[4], 1);
+    ASSERT_EQ_I32(dsp.active_band_enabled[0], EQ_CHANNEL_STEREO_MASK);
+    ASSERT_EQ_I32(dsp.active_band_enabled[1], EQ_CHANNEL_STEREO_MASK);
+    ASSERT_EQ_I32(dsp.active_band_enabled[4], EQ_CHANNEL_STEREO_MASK);
     ASSERT_TRUE(fabsf(dsp.preamp - target_preamp) < 0.000001f);
 
     bands[1] = 2000;
@@ -375,7 +375,7 @@ static void test_invalid_delay_state_is_flushed_before_processing(void) {
 
     eq_dsp_init(&dsp, 48000);
     dsp.hpf_enabled = 1;
-    dsp.active_band_enabled[3] = 1;
+    dsp.active_band_enabled[3] = EQ_CHANNEL_STEREO_MASK;
     dsp.hpf_z[0].z1 = INFINITY;
     dsp.band_z[1][3].z2 = -INFINITY;
 
@@ -454,7 +454,7 @@ static void test_invalid_active_band_coefficients_are_recovered(void) {
     eq_dsp_set_targets(&dsp, 48000, bands, 0, 0);
     eq_dsp_apply(&dsp, pcm, EQ_SMOOTH_SAMPLES, 1, &clips, NULL, NULL);
     ASSERT_EQ_I32(dsp.smooth_remaining, 0);
-    ASSERT_EQ_I32(dsp.active_band_enabled[4], 1);
+    ASSERT_EQ_I32(dsp.active_band_enabled[4], EQ_CHANNEL_STEREO_MASK);
 
     for (int i = 0; i < 8; ++i) {
         pcm[i] = 1000;
@@ -496,7 +496,7 @@ static void test_invalid_target_band_coefficients_are_disabled_before_smoothing(
     eq_dsp_set_targets(&dsp, 48000, flat, EQ_DEFAULT_PREAMP_MDB, 0);
     eq_dsp_set_targets(&dsp, 48000, bands, 0, 0);
     ASSERT_TRUE(dsp.smooth_remaining > 0);
-    ASSERT_EQ_I32(dsp.target_band_enabled[4], 1);
+    ASSERT_EQ_I32(dsp.target_band_enabled[4], EQ_CHANNEL_STEREO_MASK);
 
     dsp.target[4].b0 = NAN;
 
@@ -612,8 +612,8 @@ static void test_sample_rate_change_resets_smoothing_and_delay_state(void) {
 
     ASSERT_EQ_I32(dsp.sample_rate, 44100);
     ASSERT_EQ_I32(dsp.smooth_remaining, 0);
-    ASSERT_EQ_I32(dsp.active_band_enabled[4], 1);
-    ASSERT_EQ_I32(dsp.target_band_enabled[4], 1);
+    ASSERT_EQ_I32(dsp.active_band_enabled[4], EQ_CHANNEL_STEREO_MASK);
+    ASSERT_EQ_I32(dsp.target_band_enabled[4], EQ_CHANNEL_STEREO_MASK);
     ASSERT_TRUE(fabsf(dsp.preamp - dsp.target_preamp) < 0.000001f);
     ASSERT_EQ_I32((int32_t)dsp.band_z[0][4].z1, 0);
     ASSERT_EQ_I32((int32_t)dsp.band_z[0][4].z2, 0);

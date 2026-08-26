@@ -1,0 +1,2 @@
+# Synthetic child with a spaced file name.
+Filter: ON PK Fc 1000 Hz Gain -1 dB Q 1

@@ -1,0 +1,9 @@
+# Synthetic fixture proving that Device is ignored while Include is processed.
+Device: all
+Preamp: -4 dB
+Device: Synthetic Output {00000000-0000-0000-0000-000000000000}
+Include: included peak response.txt
+# Device: This commented directive must remain inert.
+Preamp: -5 dB
+Include: included low shelf.txt
+Include: included high shelf (3).txt

@@ -21,6 +21,25 @@ target_link_libraries(test_dsp PRIVATE m)
 
 add_test(NAME dsp COMMAND test_dsp)
 
+add_executable(test_equalizer_apo
+  test_equalizer_apo.c
+  ${CMAKE_SOURCE_DIR}/app/equalizer_apo.c
+  ${CMAKE_SOURCE_DIR}/plugin/dsp.c
+)
+
+target_compile_definitions(test_equalizer_apo PRIVATE
+  EQVITA_HOST_TESTS=1
+  EQVITA_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+target_include_directories(test_equalizer_apo PRIVATE
+  ${CMAKE_SOURCE_DIR}
+)
+
+target_link_libraries(test_equalizer_apo PRIVATE m)
+
+add_test(NAME equalizer_apo COMMAND test_equalizer_apo)
+
 add_executable(test_port_state
   test_port_state.c
 )

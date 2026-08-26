@@ -1,0 +1,34 @@
+# Synthetic stress fixture: 31 filters plus an ordered polarity operation.
+Copy: L=-1*L R=-1*R
+Preamp: -12 dB
+Filter 1: ON LSC Fc 80 Hz Gain 6 dB Q 0.7
+Filter 2: ON PK Fc 120 Hz Gain -1 dB Q 0.5
+Filter 3: ON PK Fc 180 Hz Gain 2 dB Q 0.75
+Filter 4: ON PK Fc 250 Hz Gain -3 dB Q 1
+Filter 5: ON PK Fc 350 Hz Gain 1 dB Q 1.25
+Filter 6: ON PK Fc 500 Hz Gain -2 dB Q 1.5
+Filter 7: ON PK Fc 700 Hz Gain 3 dB Q 1.75
+Filter 8: ON PK Fc 900 Hz Gain -1 dB Q 2
+Filter 9: ON PK Fc 1200 Hz Gain 2 dB Q 2.25
+Filter 10: ON PK Fc 1500 Hz Gain -3 dB Q 2.5
+Filter 11: ON PK Fc 1800 Hz Gain 1 dB Q 3
+Filter 12: ON PK Fc 2200 Hz Gain -2 dB Q 3.5
+Filter 13: ON PK Fc 2600 Hz Gain 3 dB Q 4
+Filter 14: ON PK Fc 3000 Hz Gain -1 dB Q 4.5
+Filter 15: ON PK Fc 3500 Hz Gain 2 dB Q 5
+Filter 16: ON PK Fc 4000 Hz Gain -3 dB Q 5.5
+Filter 17: ON PK Fc 4500 Hz Gain 1 dB Q 6
+Filter 18: ON PK Fc 5000 Hz Gain -2 dB Q 6.5
+Filter 19: ON PK Fc 5600 Hz Gain 3 dB Q 7
+Filter 20: ON PK Fc 6200 Hz Gain -1 dB Q 7.5
+Filter 21: ON PK Fc 6800 Hz Gain 2 dB Q 8
+Filter 22: ON PK Fc 7500 Hz Gain -3 dB Q 8.5
+Filter 23: ON PK Fc 8200 Hz Gain 1 dB Q 9
+Filter 24: ON PK Fc 9000 Hz Gain -2 dB Q 9.5
+Filter 25: ON PK Fc 9800 Hz Gain 3 dB Q 10
+Filter 26: ON PK Fc 10800 Hz Gain -1 dB Q 4
+Filter 27: ON PK Fc 11800 Hz Gain 2 dB Q 5
+Filter 28: ON HSC Fc 12500 Hz Gain -3 dB Q 0.8
+Filter 29: ON HS Fc 13500 Hz Gain 2 dB
+Filter 30: ON PK Fc 15000 Hz Gain -4 dB Q 6
+Filter 31: ON PK Fc 17000 Hz Gain 1 dB Q 8

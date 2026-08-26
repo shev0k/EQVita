@@ -7,11 +7,12 @@ set(A_SELF eboot.bin)
 
 set(VITA_APP_NAME "EQ Vita")
 set(VITA_TITLEID "EQSP00001")
-set(VITA_VERSION "01.14")
+set(VITA_VERSION "01.16")
 
 add_executable("${A_NAME}"
   main.c
   app_state.c
+  equalizer_apo.c
   media_browser.c
   media_player.c
   persistence.c
@@ -37,7 +38,7 @@ target_include_directories("${A_NAME}" PRIVATE
 
 target_link_libraries("${A_NAME}"
   eqcommon
-  EQSpeaker_stub
+  EQSpeaker_stub_weak
   vita2d
   SceAVConfig_stub
   SceAudio_stub
@@ -86,6 +87,7 @@ vita_create_vpk("${A_NAME}.vpk" "${VITA_TITLEID}" "${A_SELF}"
        assets/ui_icons_crimson_vita.png assets/ui_icons_crimson_vita.png
        assets/ui_icons_ember_core.png assets/ui_icons_ember_core.png
        assets/ui_icons_ruby_noir.png assets/ui_icons_ruby_noir.png
+       assets/peq/pch-1000.txt assets/peq/pch-1000.txt
        assets/THIRD_PARTY_NOTICES.md assets/THIRD_PARTY_NOTICES.md
        sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
        sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png

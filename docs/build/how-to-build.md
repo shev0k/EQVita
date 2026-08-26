@@ -87,6 +87,12 @@ ctest --test-dir build-host --output-on-failure
 
 These cover shared ABI/preset validation, DSP behavior, sparse audio-port tracking, app persistence, and UI source checks. They do not replace hardware testing.
 
+For the Equalizer APO parser and DSP math, an additional test cross-compiles the real-config fixtures as ARMv7 hard-float code and executes them with QEMU's Cortex-A9 CPU model. On Ubuntu/WSL, install `gcc-arm-linux-gnueabihf` and `qemu-user`, then run:
+
+```bash
+bash scripts/test-armv7-qemu.sh
+```
+
 ## App Media Preview Support
 
 The app links VitaSDK audio/file APIs plus decoder libraries for Music Preview:
@@ -129,6 +135,10 @@ Current presets are stored as validated wrapper files:
 - `ur0:data/eqvita/preset1.eqvp`
 - `ur0:data/eqvita/preset2.eqvp`
 
+User Equalizer APO configs live in `ur0:data/eqvita/peq/`. On first launch the app copies its bundled `pch-1000.txt` there without overwriting an existing file.
+
+Per-output assignments live in `ur0:data/eqvita/output-peq.eqpf`. Both the app and kernel plugin validate the wrapper and all three embedded controls before using it.
+
 Legacy raw `preset%d.bin` files are imported read-only when no `.eqvp` file exists for the slot.
 
 ## Hardware Testing
@@ -136,4 +146,3 @@ Legacy raw `preset%d.bin` files are imported read-only when no `.eqvp` file exis
 Before publishing binaries or closing runtime issues, run [hardware-test-checklist.md](../testing/hardware-test-checklist.md).
 
 For the full publish flow, use [release-checklist.md](../release/release-checklist.md).
-
