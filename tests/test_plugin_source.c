@@ -1433,25 +1433,89 @@ static void test_dsp_hot_sample_helpers_avoid_finite_checks(void)
 {
     char path[512];
     char *source;
-    char *limit_start;
-    char *limit_end;
+    char *clip_start;
+    char *clip_end;
     char *biquad_start;
     char *biquad_end;
 
     snprintf(path, sizeof(path), "%s/plugin/dsp.c", EQVITA_SOURCE_DIR);
     source = read_file(path);
 
-    limit_start = strstr(source, "static inline int16_t limit_i16");
-    ASSERT_TRUE(limit_start != NULL);
-    limit_end = strstr(limit_start + 1, "static inline uint16_t abs_i16_peak");
-    ASSERT_TRUE(limit_end != NULL);
-    ASSERT_TRUE(!range_contains(limit_start, limit_end, "isfinite"));
+    clip_start = strstr(source, "static inline int16_t hard_clip_i16");
+    ASSERT_TRUE(clip_start != NULL);
+    clip_end = strstr(clip_start + 1, "static inline uint16_t abs_i16_peak");
+    ASSERT_TRUE(clip_end != NULL);
+    ASSERT_TRUE(!range_contains(clip_start, clip_end, "isfinite"));
 
     biquad_start = strstr(source, "static inline float process_biquad");
     ASSERT_TRUE(biquad_start != NULL);
     biquad_end = strstr(biquad_start + 1, "void eq_dsp_apply_to");
     ASSERT_TRUE(biquad_end != NULL);
     ASSERT_TRUE(!range_contains(biquad_start, biquad_end, "isfinite"));
+
+    free(source);
+}
+
+static void test_dsp_has_cortex_a9_neon_kernel_with_inline_vcvtr(void)
+{
+    char path[512];
+    char *source;
+    char *kernel_start;
+    char *kernel_end;
+    char *apply_start;
+    char *apply_end;
+    char *last_clamp;
+    char *first_round;
+    char *last_round;
+    char *first_narrow;
+
+    snprintf(path, sizeof(path), "%s/plugin/dsp.c", EQVITA_SOURCE_DIR);
+    source = read_file(path);
+
+    ASSERT_TRUE(strstr(source, "#if defined(__ARM_NEON)") != NULL);
+    ASSERT_TRUE(strstr(source, "__aarch64__") == NULL);
+    kernel_start = strstr(source, "static void process_stereo_steady_neon");
+    ASSERT_TRUE(kernel_start != NULL);
+    kernel_end = strstr(kernel_start + 1, "static void process_generic_steady");
+    ASSERT_TRUE(kernel_end != NULL);
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "while (frames >= 4u)"));
+    ASSERT_TRUE(!range_contains(kernel_start, kernel_end, "while (frames >= 8u)"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmla_f32"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmls_f32"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmax_f32"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmin_f32"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vcvtr.s32.f32"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmul_lane_f32"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmla_lane_f32"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end,
+                               "vld1_f32(state->band_z[operation].z1)"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end,
+                               "vst1_f32(state->band_z[operation].z2, z2)"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end,
+                               "const eq_stereo_biquad_t *matrix = &state->active_stereo[operation]"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vld1_f32(matrix->b0)"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vld1_f32(matrix->b1)"));
+    last_clamp = strstr(kernel_start, "EQ_NEON_CLAMP_PAIR(x3)");
+    first_round = strstr(kernel_start, "EQ_VFP_ROUND_PAIR(x0, rounded0)");
+    last_round = strstr(kernel_start, "EQ_VFP_ROUND_PAIR(x3, rounded3)");
+    first_narrow = strstr(kernel_start, "packed0 = vmovn_s32");
+    ASSERT_TRUE(last_clamp != NULL);
+    ASSERT_TRUE(first_round != NULL);
+    ASSERT_TRUE(last_round != NULL);
+    ASSERT_TRUE(first_narrow != NULL);
+    ASSERT_TRUE(last_clamp < first_round);
+    ASSERT_TRUE(first_round < last_round);
+    ASSERT_TRUE(last_round < first_narrow);
+    ASSERT_TRUE(!range_contains(kernel_start, kernel_end, "vfma"));
+    apply_start = strstr(source, "void eq_dsp_apply_to");
+    ASSERT_TRUE(apply_start != NULL);
+    apply_end = strstr(apply_start + 1, "void eq_dsp_apply(");
+    ASSERT_TRUE(apply_end != NULL);
+    ASSERT_TRUE(range_contains(apply_start, apply_end, "vmrs %0, fpscr"));
+    ASSERT_TRUE(range_contains(apply_start, apply_end, "vmsr fpscr, %0"));
+    ASSERT_TRUE(!range_contains(apply_start, apply_end, "sanitize_biquad_state"));
+    ASSERT_TRUE(!range_contains(apply_start, apply_end, "flush_denormal_delay_state"));
+    ASSERT_TRUE(strstr(source, "const float knee") == NULL);
 
     free(source);
 }
@@ -1654,6 +1718,7 @@ int main(void)
     test_dsp_state_caches_active_band_indexes();
     test_dsp_apply_has_stereo_steady_state_fast_path();
     test_dsp_hot_sample_helpers_avoid_finite_checks();
+    test_dsp_has_cortex_a9_neon_kernel_with_inline_vcvtr();
     test_speaker_retarget_honors_hpf_control_before_folding_31hz();
     test_output_hook_records_slowest_block_context();
     test_output_hook_measures_total_time_and_deadline_margin();

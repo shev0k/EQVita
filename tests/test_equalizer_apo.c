@@ -511,8 +511,8 @@ static void test_synthetic_configs_run_through_dsp_without_nonfinite_state(void)
             CHECK(isfinite(dsp.active[operation].a1));
             CHECK(isfinite(dsp.active[operation].a2));
             for (int channel = 0; channel < 2; ++channel) {
-                CHECK(isfinite(dsp.band_z[channel][operation].z1));
-                CHECK(isfinite(dsp.band_z[channel][operation].z2));
+                CHECK(isfinite(dsp.band_z[operation].z1[channel]));
+                CHECK(isfinite(dsp.band_z[operation].z2[channel]));
             }
         }
     }

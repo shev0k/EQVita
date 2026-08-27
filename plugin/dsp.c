@@ -3,11 +3,26 @@
 #include <math.h>
 #include <string.h>
 
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#define EQVITA_CORTEX_A9_NEON 1
+#else
+#define EQVITA_CORTEX_A9_NEON 0
+#endif
+
 #define EQ_Q_VALUE 0.707f
 #define EQ_PI 3.14159265358979323846f
 
 static int g_errno_stub;
 int *__errno(void) { return &g_errno_stub; }
+
+#if defined(EQVITA_DSP_TEST_API)
+static int g_neon_enabled_for_tests = 1;
+
+void eq_dsp_set_neon_enabled_for_tests(int enabled) {
+    g_neon_enabled_for_tests = enabled ? 1 : 0;
+}
+#endif
 
 static void biquad_identity(eq_biquad_t *out);
 static int biquad_is_finite(const eq_biquad_t *c);
@@ -241,7 +256,7 @@ static void biquad_highpass(eq_biquad_t *out, uint32_t sample_rate, float freq) 
 
 static void reset_delay_state(eq_dsp_state_t *state) {
     memset(state->band_z, 0, sizeof(state->band_z));
-    memset(state->hpf_z, 0, sizeof(state->hpf_z));
+    memset(&state->hpf_z, 0, sizeof(state->hpf_z));
 }
 
 static void reset_hpf_delay_state(eq_dsp_state_t *state) {
@@ -249,7 +264,7 @@ static void reset_hpf_delay_state(eq_dsp_state_t *state) {
         return;
     }
 
-    memset(state->hpf_z, 0, sizeof(state->hpf_z));
+    memset(&state->hpf_z, 0, sizeof(state->hpf_z));
 }
 
 static void reset_band_delay_state(eq_dsp_state_t *state, int band) {
@@ -257,10 +272,7 @@ static void reset_band_delay_state(eq_dsp_state_t *state, int band) {
         return;
     }
 
-    for (int ch = 0; ch < EQ_DSP_MAX_CHANNELS; ++ch) {
-        state->band_z[ch][band].z1 = 0.0f;
-        state->band_z[ch][band].z2 = 0.0f;
-    }
+    memset(&state->band_z[band], 0, sizeof(state->band_z[band]));
 }
 
 static void rebuild_band_index(const uint8_t *enabled, uint8_t *index, uint8_t *count) {
@@ -288,9 +300,47 @@ static void rebuild_dsp_band_indexes(eq_dsp_state_t *state) {
     rebuild_band_index(state->target_band_enabled, state->target_band_index, &state->target_band_count);
 }
 
-static void sanitize_biquad_state(eq_dsp_state_t *state) {
+static void rebuild_active_stereo_coefficients(eq_dsp_state_t *state) {
     if (!state) {
         return;
+    }
+
+    for (int operation = 0; operation < EQ_PARAMETRIC_FILTERS; ++operation) {
+        const eq_biquad_t *source = &state->active[operation];
+        eq_stereo_biquad_t *packed = &state->active_stereo[operation];
+        uint8_t channel_mask = state->active_band_enabled[operation];
+
+        if (state->active_operation_type[operation] == EQ_FILTER_COPY) {
+            packed->b0[0] = source->b0;
+            packed->b0[1] = source->b2;
+            packed->b1[0] = source->b1;
+            packed->b1[1] = source->a1;
+            continue;
+        }
+
+        for (int channel = 0; channel < EQ_DSP_MAX_CHANNELS; ++channel) {
+            if (channel_mask & (uint8_t)(1u << channel)) {
+                packed->b0[channel] = source->b0;
+                packed->b1[channel] = source->b1;
+                packed->b2[channel] = source->b2;
+                packed->a1[channel] = source->a1;
+                packed->a2[channel] = source->a2;
+            } else {
+                packed->b0[channel] = 1.0f;
+                packed->b1[channel] = 0.0f;
+                packed->b2[channel] = 0.0f;
+                packed->a1[channel] = 0.0f;
+                packed->a2[channel] = 0.0f;
+            }
+        }
+    }
+}
+
+static int sanitize_biquad_state(eq_dsp_state_t *state) {
+    int active_changed = 0;
+
+    if (!state) {
+        return 0;
     }
 
     if (!biquad_is_finite(&state->hpf)) {
@@ -314,66 +364,22 @@ static void sanitize_biquad_state(eq_dsp_state_t *state) {
                 state->active_band_enabled[b] = 0;
             }
             reset_band_delay_state(state, b);
+            active_changed = 1;
         }
     }
 
     rebuild_dsp_band_indexes(state);
+    return active_changed;
 }
 
-static void flush_denormal_delay_state(eq_dsp_state_t *state, uint32_t channels) {
-    if (!state) {
-        return;
-    }
-
-    if (channels > EQ_DSP_MAX_CHANNELS) {
-        channels = EQ_DSP_MAX_CHANNELS;
-    }
-
-    for (uint32_t ch = 0; ch < channels; ++ch) {
-        if (!isfinite(state->hpf_z[ch].z1) || fabsf(state->hpf_z[ch].z1) < 1e-15f) state->hpf_z[ch].z1 = 0.0f;
-        if (!isfinite(state->hpf_z[ch].z2) || fabsf(state->hpf_z[ch].z2) < 1e-15f) state->hpf_z[ch].z2 = 0.0f;
-        for (uint8_t i = 0; i < state->active_band_count; ++i) {
-            uint8_t b = state->active_band_index[i];
-            if (!(state->active_band_enabled[b] & (uint8_t)(1u << ch))) {
-                continue;
-            }
-            if (!isfinite(state->band_z[ch][b].z1) || fabsf(state->band_z[ch][b].z1) < 1e-15f) state->band_z[ch][b].z1 = 0.0f;
-            if (!isfinite(state->band_z[ch][b].z2) || fabsf(state->band_z[ch][b].z2) < 1e-15f) state->band_z[ch][b].z2 = 0.0f;
-        }
-    }
-}
-
-static inline int16_t limit_i16(float x, int32_t *clip_counter) {
-    const float knee = 32600.0f;
-    float sign = 1.0f;
-    float ax = x;
-    float limit = 32767.0f;
-    float knee_range;
-
-    if (x < 0.0f) {
-        sign = -1.0f;
-        ax = -x;
-        limit = 32768.0f;
-    }
-
-    if (ax > limit) {
-        float over = ax - knee;
-        if (clip_counter) {
-            (*clip_counter)++;
-        }
-        knee_range = limit - knee;
-        ax = knee + (knee_range * over) / (over + knee_range);
-        x = sign * ax;
-    }
-
-    x = (x >= 0.0f) ? (x + 0.5f) : (x - 0.5f);
+static inline int16_t hard_clip_i16(float x) {
     if (x > 32767.0f) {
-        return 32767;
+        x = 32767.0f;
+    } else if (x < -32768.0f) {
+        x = -32768.0f;
     }
-    if (x < -32768.0f) {
-        return -32768;
-    }
-    return (int16_t)x;
+
+    return (int16_t)lrintf(x);
 }
 
 static inline uint16_t abs_i16_peak(int16_t value) {
@@ -444,6 +450,7 @@ void eq_dsp_init(eq_dsp_state_t *state, uint32_t sample_rate) {
     // Init HPF at 70Hz
     biquad_highpass(&state->hpf, state->sample_rate, 70);
     reset_delay_state(state);
+    rebuild_active_stereo_coefficients(state);
 }
 
 static void commit_targets(eq_dsp_state_t *state,
@@ -467,7 +474,9 @@ static void commit_targets(eq_dsp_state_t *state,
 
     sanitize_preamp_state(state);
     sanitize_smoothing_state(state);
-    sanitize_biquad_state(state);
+    if (sanitize_biquad_state(state)) {
+        rebuild_active_stereo_coefficients(state);
+    }
     first_target = !state->targets_initialized;
 
     sample_rate = normalize_sample_rate(sample_rate);
@@ -540,6 +549,7 @@ static void commit_targets(eq_dsp_state_t *state,
     }
     state->hpf_enabled = hpf_enabled ? 1 : 0;
     state->targets_initialized = 1;
+    rebuild_active_stereo_coefficients(state);
 }
 
 void eq_dsp_set_targets(eq_dsp_state_t *state,
@@ -656,13 +666,17 @@ void eq_dsp_set_parametric_targets(eq_dsp_state_t *state,
                    (uint8_t)filter_count, preamp_mdB, hpf_enabled);
 }
 
-static inline float process_biquad(const eq_biquad_t *c, eq_biquad_delay_t *z, float x) {
-    float y = c->b0 * x + z->z1;
-    z->z1 = c->b1 * x - c->a1 * y + z->z2;
-    z->z2 = c->b2 * x - c->a2 * y;
+static inline float process_biquad_channel(const eq_biquad_t *c,
+                                           eq_stereo_biquad_delay_t *z,
+                                           uint32_t channel,
+                                           float x) {
+    float y = c->b0 * x + z->z1[channel];
+    z->z1[channel] = z->z2[channel] + c->b1 * x - c->a1 * y;
+    z->z2[channel] = c->b2 * x - c->a2 * y;
     return y;
 }
 
+#if !EQVITA_CORTEX_A9_NEON || defined(EQVITA_DSP_TEST_API)
 static void process_stereo_steady(eq_dsp_state_t *state, const int16_t *input, int16_t *output,
                                   uint32_t frames, int32_t *clip_counter,
                                   uint16_t *peak_l, uint16_t *peak_r) {
@@ -670,13 +684,15 @@ static void process_stereo_steady(eq_dsp_state_t *state, const int16_t *input, i
     uint16_t max_l = 0;
     uint16_t max_r = 0;
 
+    (void)clip_counter;
+
     for (uint32_t frame = 0; frame < frames; ++frame) {
         float left = (float)input[0];
         float right = (float)input[1];
 
         if (state->hpf_enabled) {
-            left = process_biquad(&state->hpf, &state->hpf_z[0], left) * preamp;
-            right = process_biquad(&state->hpf, &state->hpf_z[1], right) * preamp;
+            left = process_biquad_channel(&state->hpf, &state->hpf_z, 0, left) * preamp;
+            right = process_biquad_channel(&state->hpf, &state->hpf_z, 1, right) * preamp;
         } else {
             left *= preamp;
             right *= preamp;
@@ -692,17 +708,17 @@ static void process_stereo_steady(eq_dsp_state_t *state, const int16_t *input, i
             } else {
                 uint8_t channel_mask = state->active_band_enabled[operation];
                 if (channel_mask & EQ_CHANNEL_LEFT_MASK) {
-                    left = process_biquad(&state->active[operation], &state->band_z[0][operation], left);
+                    left = process_biquad_channel(&state->active[operation], &state->band_z[operation], 0, left);
                 }
                 if (channel_mask & EQ_CHANNEL_RIGHT_MASK) {
-                    right = process_biquad(&state->active[operation], &state->band_z[1][operation], right);
+                    right = process_biquad_channel(&state->active[operation], &state->band_z[operation], 1, right);
                 }
             }
         }
 
         {
-            int16_t out_l = limit_i16(left, clip_counter);
-            int16_t out_r = limit_i16(right, clip_counter);
+            int16_t out_l = hard_clip_i16(left);
+            int16_t out_r = hard_clip_i16(right);
             uint16_t abs_l = abs_i16_peak(out_l);
             uint16_t abs_r = abs_i16_peak(out_r);
 
@@ -718,6 +734,218 @@ static void process_stereo_steady(eq_dsp_state_t *state, const int16_t *input, i
     if (peak_l) *peak_l = max_l;
     if (peak_r) *peak_r = max_r;
 }
+#endif
+
+#if EQVITA_CORTEX_A9_NEON
+static void process_stereo_steady_neon(eq_dsp_state_t *state, const int16_t *input, int16_t *output,
+                                       uint32_t frames, int32_t *clip_counter,
+                                       uint16_t *peak_l, uint16_t *peak_r) {
+    const float32x2_t lower = vdup_n_f32(-32768.0f);
+    const float32x2_t upper = vdup_n_f32(32767.0f);
+    const float32x2_t preamp = vdup_n_f32(state->preamp);
+    float32x2_t peak = vdup_n_f32(0.0f);
+
+    (void)clip_counter;
+
+#define EQ_NEON_DF2T_STEP(SAMPLE) do { \
+        float32x2_t eq_y = vmla_f32(z1, (SAMPLE), b0); \
+        z1 = vmls_f32(vmla_f32(z2, (SAMPLE), b1), eq_y, a1); \
+        z2 = vmls_f32(vmul_f32((SAMPLE), b2), eq_y, a2); \
+        (SAMPLE) = eq_y; \
+    } while (0)
+
+#define EQ_NEON_COPY_STEP(SAMPLE) do { \
+        float32x2_t eq_copy_input = (SAMPLE); \
+        float32x2_t eq_copy_output = vmul_lane_f32(column_l, eq_copy_input, 0); \
+        (SAMPLE) = vmla_lane_f32(eq_copy_output, column_r, eq_copy_input, 1); \
+    } while (0)
+
+#define EQ_NEON_CLAMP_PAIR(SAMPLE) do { \
+        (SAMPLE) = vmax_f32((SAMPLE), lower); \
+        (SAMPLE) = vmin_f32((SAMPLE), upper); \
+        peak = vmax_f32(peak, vabs_f32((SAMPLE))); \
+    } while (0)
+
+#define EQ_VFP_ROUND_PAIR(SAMPLE, RESULT) do { \
+        __asm__ volatile( \
+            "vcvtr.s32.f32 %0, %0\n\t" \
+            "vcvtr.s32.f32 %p0, %p0" \
+            : "+t"(SAMPLE)); \
+        (RESULT) = vreinterpret_s32_f32(SAMPLE); \
+    } while (0)
+
+    while (frames >= 4u) {
+        int16x8_t packed0 = vld1q_s16(input);
+        float32x4_t q0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(packed0)));
+        float32x4_t q1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(packed0)));
+        float32x2_t x0 = vget_low_f32(q0);
+        float32x2_t x1 = vget_high_f32(q0);
+        float32x2_t x2 = vget_low_f32(q1);
+        float32x2_t x3 = vget_high_f32(q1);
+
+        if (state->hpf_enabled) {
+            const eq_biquad_t *coefficients = &state->hpf;
+            float32x2_t b0 = vdup_n_f32(coefficients->b0);
+            float32x2_t b1 = vdup_n_f32(coefficients->b1);
+            float32x2_t b2 = vdup_n_f32(coefficients->b2);
+            float32x2_t a1 = vdup_n_f32(coefficients->a1);
+            float32x2_t a2 = vdup_n_f32(coefficients->a2);
+            float32x2_t z1 = vld1_f32(state->hpf_z.z1);
+            float32x2_t z2 = vld1_f32(state->hpf_z.z2);
+
+            EQ_NEON_DF2T_STEP(x0);
+            EQ_NEON_DF2T_STEP(x1);
+            EQ_NEON_DF2T_STEP(x2);
+            EQ_NEON_DF2T_STEP(x3);
+
+            vst1_f32(state->hpf_z.z1, z1);
+            vst1_f32(state->hpf_z.z2, z2);
+        }
+
+        x0 = vmul_f32(x0, preamp);
+        x1 = vmul_f32(x1, preamp);
+        x2 = vmul_f32(x2, preamp);
+        x3 = vmul_f32(x3, preamp);
+
+        for (uint8_t operation = 0; operation < state->active_operation_count; ++operation) {
+            if (state->active_operation_type[operation] == EQ_FILTER_COPY) {
+                const eq_stereo_biquad_t *matrix = &state->active_stereo[operation];
+                float32x2_t column_l = vld1_f32(matrix->b0);
+                float32x2_t column_r = vld1_f32(matrix->b1);
+
+                EQ_NEON_COPY_STEP(x0);
+                EQ_NEON_COPY_STEP(x1);
+                EQ_NEON_COPY_STEP(x2);
+                EQ_NEON_COPY_STEP(x3);
+            } else if (state->active_band_enabled[operation] != 0) {
+                const eq_stereo_biquad_t *coefficients = &state->active_stereo[operation];
+                float32x2_t b0 = vld1_f32(coefficients->b0);
+                float32x2_t b1 = vld1_f32(coefficients->b1);
+                float32x2_t b2 = vld1_f32(coefficients->b2);
+                float32x2_t a1 = vld1_f32(coefficients->a1);
+                float32x2_t a2 = vld1_f32(coefficients->a2);
+                float32x2_t z1 = vld1_f32(state->band_z[operation].z1);
+                float32x2_t z2 = vld1_f32(state->band_z[operation].z2);
+
+                EQ_NEON_DF2T_STEP(x0);
+                EQ_NEON_DF2T_STEP(x1);
+                EQ_NEON_DF2T_STEP(x2);
+                EQ_NEON_DF2T_STEP(x3);
+
+                vst1_f32(state->band_z[operation].z1, z1);
+                vst1_f32(state->band_z[operation].z2, z2);
+            }
+        }
+
+        {
+            int32x2_t rounded0;
+            int32x2_t rounded1;
+            int32x2_t rounded2;
+            int32x2_t rounded3;
+            int16x4_t packed0;
+            int16x4_t packed1;
+
+            EQ_NEON_CLAMP_PAIR(x0);
+            EQ_NEON_CLAMP_PAIR(x1);
+            EQ_NEON_CLAMP_PAIR(x2);
+            EQ_NEON_CLAMP_PAIR(x3);
+
+            EQ_VFP_ROUND_PAIR(x0, rounded0);
+            EQ_VFP_ROUND_PAIR(x1, rounded1);
+            EQ_VFP_ROUND_PAIR(x2, rounded2);
+            EQ_VFP_ROUND_PAIR(x3, rounded3);
+
+            packed0 = vmovn_s32(vcombine_s32(rounded0, rounded1));
+            packed1 = vmovn_s32(vcombine_s32(rounded2, rounded3));
+            vst1q_s16(output, vcombine_s16(packed0, packed1));
+        }
+
+        input += 8;
+        output += 8;
+        frames -= 4u;
+    }
+
+    while (frames > 0u) {
+        int16x4_t packed = vdup_n_s16(input[0]);
+        float32x2_t x;
+
+        packed = vset_lane_s16(input[1], packed, 1);
+        x = vget_low_f32(vcvtq_f32_s32(vmovl_s16(packed)));
+
+        if (state->hpf_enabled) {
+            const eq_biquad_t *coefficients = &state->hpf;
+            float32x2_t b0 = vdup_n_f32(coefficients->b0);
+            float32x2_t b1 = vdup_n_f32(coefficients->b1);
+            float32x2_t b2 = vdup_n_f32(coefficients->b2);
+            float32x2_t a1 = vdup_n_f32(coefficients->a1);
+            float32x2_t a2 = vdup_n_f32(coefficients->a2);
+            float32x2_t z1 = vld1_f32(state->hpf_z.z1);
+            float32x2_t z2 = vld1_f32(state->hpf_z.z2);
+
+            EQ_NEON_DF2T_STEP(x);
+
+            vst1_f32(state->hpf_z.z1, z1);
+            vst1_f32(state->hpf_z.z2, z2);
+        }
+
+        x = vmul_f32(x, preamp);
+        for (uint8_t operation = 0; operation < state->active_operation_count; ++operation) {
+            if (state->active_operation_type[operation] == EQ_FILTER_COPY) {
+                const eq_stereo_biquad_t *matrix = &state->active_stereo[operation];
+                float32x2_t column_l = vld1_f32(matrix->b0);
+                float32x2_t column_r = vld1_f32(matrix->b1);
+                EQ_NEON_COPY_STEP(x);
+            } else if (state->active_band_enabled[operation] != 0) {
+                const eq_stereo_biquad_t *coefficients = &state->active_stereo[operation];
+                float32x2_t b0 = vld1_f32(coefficients->b0);
+                float32x2_t b1 = vld1_f32(coefficients->b1);
+                float32x2_t b2 = vld1_f32(coefficients->b2);
+                float32x2_t a1 = vld1_f32(coefficients->a1);
+                float32x2_t a2 = vld1_f32(coefficients->a2);
+                float32x2_t z1 = vld1_f32(state->band_z[operation].z1);
+                float32x2_t z2 = vld1_f32(state->band_z[operation].z2);
+
+                EQ_NEON_DF2T_STEP(x);
+
+                vst1_f32(state->band_z[operation].z1, z1);
+                vst1_f32(state->band_z[operation].z2, z2);
+            }
+        }
+
+        {
+            int32x2_t rounded;
+            int16x4_t packed;
+
+            EQ_NEON_CLAMP_PAIR(x);
+            EQ_VFP_ROUND_PAIR(x, rounded);
+            packed = vmovn_s32(vcombine_s32(rounded, rounded));
+            vst1_lane_s16(output, packed, 0);
+            vst1_lane_s16(output + 1, packed, 1);
+        }
+        input += 2;
+        output += 2;
+        frames--;
+    }
+
+#undef EQ_VFP_ROUND_PAIR
+#undef EQ_NEON_CLAMP_PAIR
+#undef EQ_NEON_COPY_STEP
+#undef EQ_NEON_DF2T_STEP
+
+    {
+        int32x2_t rounded_peak;
+
+        __asm__ volatile(
+            "vcvtr.s32.f32 %0, %0\n\t"
+            "vcvtr.s32.f32 %p0, %p0"
+            : "+t"(peak));
+        rounded_peak = vreinterpret_s32_f32(peak);
+        if (peak_l) *peak_l = (uint16_t)vget_lane_s32(rounded_peak, 0);
+        if (peak_r) *peak_r = (uint16_t)vget_lane_s32(rounded_peak, 1);
+    }
+
+}
+#endif
 
 static void process_generic_steady(eq_dsp_state_t *state, const int16_t *input, int16_t *output,
                                    uint32_t frames, uint32_t channels, int32_t *clip_counter,
@@ -726,13 +954,15 @@ static void process_generic_steady(eq_dsp_state_t *state, const int16_t *input, 
     uint16_t max_l = 0;
     uint16_t max_r = 0;
 
+    (void)clip_counter;
+
     for (uint32_t frame = 0; frame < frames; ++frame) {
         for (uint32_t ch = 0; ch < channels; ++ch) {
             int32_t idx = (frame * channels) + ch;
             float sample = (float)input[idx];
 
             if (state->hpf_enabled) {
-                sample = process_biquad(&state->hpf, &state->hpf_z[ch], sample);
+                sample = process_biquad_channel(&state->hpf, &state->hpf_z, ch, sample);
             }
 
             sample *= preamp;
@@ -741,11 +971,11 @@ static void process_generic_steady(eq_dsp_state_t *state, const int16_t *input, 
                 if (state->active_operation_type[operation] == EQ_FILTER_COPY) {
                     sample *= state->active[operation].b0 + state->active[operation].b1;
                 } else if (state->active_band_enabled[operation] & EQ_CHANNEL_LEFT_MASK) {
-                    sample = process_biquad(&state->active[operation], &state->band_z[ch][operation], sample);
+                    sample = process_biquad_channel(&state->active[operation], &state->band_z[operation], ch, sample);
                 }
             }
 
-            int16_t out_val = limit_i16(sample, clip_counter);
+            int16_t out_val = hard_clip_i16(sample);
             uint16_t abs_val = abs_i16_peak(out_val);
             output[idx] = out_val;
 
@@ -762,21 +992,46 @@ static void process_generic_steady(eq_dsp_state_t *state, const int16_t *input, 
 }
 
 void eq_dsp_apply_to(eq_dsp_state_t *state, const int16_t *input, int16_t *output, uint32_t frames, uint32_t channels, int32_t *clip_counter, uint16_t *peak_l, uint16_t *peak_r) {
+#if EQVITA_CORTEX_A9_NEON
+    uint32_t saved_fpscr;
+    uint32_t processing_fpscr;
+#endif
+
     if (!state || !input || !output || channels < 1 || channels > EQ_DSP_MAX_CHANNELS) { return; }
 
-    sanitize_preamp_state(state);
-    sanitize_smoothing_state(state);
-    sanitize_biquad_state(state);
-    flush_denormal_delay_state(state, channels);
+#if EQVITA_CORTEX_A9_NEON
+    /*
+     * VCVTR uses FPSCR.RMode. Run every Vita DSP path with nearest-even
+     * rounding and scalar VFP flush-to-zero, then restore the caller's FPSCR.
+     * Cortex-A9 Advanced SIMD arithmetic is flush-to-zero independently.
+     */
+    __asm__ volatile("vmrs %0, fpscr" : "=r"(saved_fpscr));
+    processing_fpscr = (saved_fpscr & ~(3u << 22)) | (1u << 24);
+    __asm__ volatile("vmsr fpscr, %0" : : "r"(processing_fpscr) : "memory");
+#endif
 
     if (state->smooth_remaining == 0) {
         if (channels == 2) {
+#if EQVITA_CORTEX_A9_NEON
+#if defined(EQVITA_DSP_TEST_API)
+            if (g_neon_enabled_for_tests) {
+                process_stereo_steady_neon(state, input, output, frames, clip_counter, peak_l, peak_r);
+            } else {
+                process_stereo_steady(state, input, output, frames, clip_counter, peak_l, peak_r);
+            }
+#else
+            process_stereo_steady_neon(state, input, output, frames, clip_counter, peak_l, peak_r);
+#endif
+#else
             process_stereo_steady(state, input, output, frames, clip_counter, peak_l, peak_r);
+#endif
         } else {
             process_generic_steady(state, input, output, frames, channels, clip_counter, peak_l, peak_r);
         }
 
-        flush_denormal_delay_state(state, channels);
+#if EQVITA_CORTEX_A9_NEON
+        __asm__ volatile("vmsr fpscr, %0" : : "r"(saved_fpscr) : "memory");
+#endif
         return;
     }
 
@@ -811,7 +1066,7 @@ void eq_dsp_apply_to(eq_dsp_state_t *state, const int16_t *input, int16_t *outpu
             for (uint32_t ch = 0; ch < channels; ++ch) {
                 sample[ch] = (float)input[(i * channels) + ch];
                 if (state->hpf_enabled) {
-                    sample[ch] = process_biquad(&state->hpf, &state->hpf_z[ch], sample[ch]);
+                    sample[ch] = process_biquad_channel(&state->hpf, &state->hpf_z, ch, sample[ch]);
                 }
                 sample[ch] *= preamp;
             }
@@ -834,7 +1089,7 @@ void eq_dsp_apply_to(eq_dsp_state_t *state, const int16_t *input, int16_t *outpu
                                                                   &state->active[operation];
                 for (uint32_t ch = 0; ch < channels; ++ch) {
                     if (channel_mask & (uint8_t)(1u << ch)) {
-                        sample[ch] = process_biquad(coefficients, &state->band_z[ch][operation], sample[ch]);
+                        sample[ch] = process_biquad_channel(coefficients, &state->band_z[operation], ch, sample[ch]);
                     }
                 }
             }
@@ -842,7 +1097,7 @@ void eq_dsp_apply_to(eq_dsp_state_t *state, const int16_t *input, int16_t *outpu
 
         for (uint32_t ch = 0; ch < channels; ++ch) {
             int32_t idx = (i * channels) + ch;
-            int16_t out_val = limit_i16(sample[ch], clip_counter);
+            int16_t out_val = hard_clip_i16(sample[ch]);
             uint16_t abs_val = abs_i16_peak(out_val);
             output[idx] = out_val;
             if (ch == 0) {
@@ -864,8 +1119,8 @@ void eq_dsp_apply_to(eq_dsp_state_t *state, const int16_t *input, int16_t *outpu
                     } else {
                         for (uint32_t ch = 0; ch < channels; ++ch) {
                             if (!(state->active_band_enabled[b] & (uint8_t)(1u << ch))) {
-                                state->band_z[ch][b].z1 = 0.0f;
-                                state->band_z[ch][b].z2 = 0.0f;
+                                state->band_z[b].z1[ch] = 0.0f;
+                                state->band_z[b].z2[ch] = 0.0f;
                             }
                         }
                     }
@@ -874,12 +1129,15 @@ void eq_dsp_apply_to(eq_dsp_state_t *state, const int16_t *input, int16_t *outpu
                 state->active_band_count = state->target_band_count;
                 state->active_operation_count = state->target_operation_count;
                 state->preamp = state->target_preamp;
+                rebuild_active_stereo_coefficients(state);
             }
         }
     }
 
-    flush_denormal_delay_state(state, channels);
-    
+#if EQVITA_CORTEX_A9_NEON
+    __asm__ volatile("vmsr fpscr, %0" : : "r"(saved_fpscr) : "memory");
+#endif
+
     if (peak_l) *peak_l = max_l;
     if (peak_r) *peak_r = max_r;
 }
