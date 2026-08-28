@@ -1,0 +1,1 @@
+Filter: ON PK Fc 3000 Hz Gain 3 dB Q 3

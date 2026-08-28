@@ -1,0 +1,2 @@
+Preamp: -3 dB
+Include: sub\..\child.txt

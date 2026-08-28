@@ -40,16 +40,34 @@ static void fixture_path(char *out, size_t out_size, const char *name)
     snprintf(out, out_size, "%s/tests/fixtures/equalizer_apo/%s", EQVITA_SOURCE_DIR, name);
 }
 
+static eqvita_apo_import_policy_t import_policy(const char *const *roots,
+                                                 size_t root_count,
+                                                 uint32_t max_files,
+                                                 uint32_t max_bytes)
+{
+    eqvita_apo_import_policy_t policy;
+    policy.allowed_roots = roots;
+    policy.allowed_root_count = root_count;
+    policy.max_file_count = max_files;
+    policy.max_total_bytes = max_bytes;
+    return policy;
+}
+
 static int import_fixture(const char *name,
                           eq_control_t *control,
                           eqvita_apo_import_result_t *result)
 {
     char path[1024];
+    char root[1024];
+    const char *roots[] = {root};
+    eqvita_apo_import_policy_t policy;
     eq_control_t base;
 
     fixture_path(path, sizeof(path), name);
+    fixture_path(root, sizeof(root), "");
+    policy = import_policy(roots, 1u, 32u, 512u * 1024u);
     eq_control_init_defaults(&base);
-    return eqvita_apo_import_file(path, &base, control, result);
+    return eqvita_apo_import_file(path, &policy, &base, control, result);
 }
 
 static void test_synthetic_fixture_corpus(void)
@@ -132,11 +150,16 @@ static void test_import_is_an_exclusive_enabled_peq_mode(void)
 static void test_bundled_pch1000_peq(void)
 {
     char path[1024];
+    char root[1024];
+    const char *roots[] = {root};
+    eqvita_apo_import_policy_t policy;
     eq_control_t control;
     eqvita_apo_import_result_t result;
 
     snprintf(path, sizeof(path), "%s/app/assets/peq/pch-1000.txt", EQVITA_SOURCE_DIR);
-    CHECK(eqvita_apo_import_file(path, NULL, &control, &result) == 0);
+    snprintf(root, sizeof(root), "%s/app/assets/peq/", EQVITA_SOURCE_DIR);
+    policy = import_policy(roots, 1u, 32u, 512u * 1024u);
+    CHECK(eqvita_apo_import_file(path, &policy, NULL, &control, &result) == 0);
     CHECK_I32(control.enabled, 1);
     CHECK_I32(control.eq_mode, EQ_MODE_PARAMETRIC);
     CHECK_I32(control.preamp_mdB, -5000);
@@ -273,6 +296,71 @@ static void test_include_restores_outer_channel_selection(void)
     CHECK_I32(control.parametric_filter_count, 2);
     CHECK_I32(control.parametric_filters[0].channel_mask, EQ_CHANNEL_LEFT_MASK);
     CHECK_I32(control.parametric_filters[1].channel_mask, EQ_CHANNEL_RIGHT_MASK);
+}
+
+static void test_file_import_policy_contains_paths_and_budgets(void)
+{
+    char root[1024];
+    char path[1024];
+    const char *roots[] = {root};
+    eqvita_apo_import_policy_t policy;
+    eq_control_t control;
+    eqvita_apo_import_result_t result;
+
+    fixture_path(root, sizeof(root), "security/root");
+    policy = import_policy(roots, 1u, 32u, 512u * 1024u);
+
+    fixture_path(path, sizeof(path), "security/root/child.txt");
+    CHECK(eqvita_apo_import_file(path, &policy, NULL, &control, &result) == 0);
+
+    fixture_path(path, sizeof(path), "security/root/main_allowed.txt");
+    CHECK(eqvita_apo_import_file(path, &policy, NULL, &control, &result) == 0);
+    CHECK_I32(result.include_count, 1);
+    CHECK_I32(result.filter_count, 1);
+    CHECK_I32(control.preamp_mdB, -3000);
+
+    fixture_path(path, sizeof(path), "security/outside.txt");
+    CHECK(eqvita_apo_import_file(path, &policy, NULL, &control, &result) < 0);
+    CHECK(strstr(result.message, "allowed root") != NULL);
+
+    fixture_path(path, sizeof(path), "security/root_evil/outside.txt");
+    CHECK(eqvita_apo_import_file(path, &policy, NULL, &control, &result) < 0);
+    CHECK(strstr(result.message, "allowed root") != NULL);
+
+    CHECK(eqvita_apo_import_file("ux0:data/profile.txt", &policy,
+                                 NULL, &control, &result) < 0);
+    CHECK(strstr(result.message, "allowed root") != NULL);
+
+    fixture_path(path, sizeof(path), "security/root/main_escape.txt");
+    CHECK(eqvita_apo_import_file(path, &policy, NULL, &control, &result) < 0);
+    CHECK(strstr(result.message, "allowed root") != NULL);
+
+    fixture_path(path, sizeof(path), "security/root/main_prefix_escape.txt");
+    CHECK(eqvita_apo_import_file(path, &policy, NULL, &control, &result) < 0);
+    CHECK(strstr(result.message, "allowed root") != NULL);
+
+    fixture_path(path, sizeof(path), "security/root/main_cycle_alias.txt");
+    CHECK(eqvita_apo_import_file(path, &policy, NULL, &control, &result) < 0);
+    CHECK(strstr(result.message, "cycle") != NULL);
+
+    fixture_path(path, sizeof(path), "security/root/main_repeat.txt");
+    CHECK(eqvita_apo_import_file(path, &policy, NULL, &control, &result) == 0);
+    CHECK_I32(result.include_count, 2);
+    CHECK_I32(result.filter_count, 2);
+
+    policy.max_file_count = 2u;
+    CHECK(eqvita_apo_import_file(path, &policy, NULL, &control, &result) < 0);
+    CHECK(strstr(result.message, "file limit") != NULL);
+
+    policy.max_file_count = 3u;
+    policy.max_total_bytes = 100u;
+    CHECK(eqvita_apo_import_file(path, &policy, NULL, &control, &result) < 0);
+    CHECK(strstr(result.message, "byte limit") != NULL);
+
+    policy.max_total_bytes = 512u * 1024u;
+    fixture_path(path, sizeof(path), "security/root/missing.txt");
+    CHECK(eqvita_apo_import_file(path, &policy, NULL, &control, &result) < 0);
+    CHECK(strstr(result.message, "Could not read") != NULL);
 }
 
 static void test_comments_off_filters_and_decimal_comma(void)
@@ -575,6 +663,7 @@ int main(void)
     test_channel_masks_and_operation_order();
     test_device_is_ignored_and_include_is_inline();
     test_include_restores_outer_channel_selection();
+    test_file_import_policy_contains_paths_and_budgets();
     test_comments_off_filters_and_decimal_comma();
     test_capacity_and_unsupported_commands_fail_loudly();
     test_copy_audio_results();

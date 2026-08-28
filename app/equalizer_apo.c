@@ -13,13 +13,15 @@
 #endif
 
 #define APO_MAX_LINE 1024
-#define APO_MAX_FILE_BYTES (256u * 1024u)
 #define APO_MAX_INCLUDE_DEPTH 8
 
 typedef struct apo_parse_context
 {
     eq_control_t control;
     eqvita_apo_import_result_t *result;
+    const eqvita_apo_import_policy_t *policy;
+    uint32_t file_count;
+    uint32_t total_bytes;
     uint8_t channel_mask;
     int saw_setting;
     char include_stack[APO_MAX_INCLUDE_DEPTH][EQVITA_APO_MAX_ERROR_PATH];
@@ -533,53 +535,159 @@ static int parse_channel(apo_parse_context_t *ctx, char *parameters, const char 
     return 0;
 }
 
+static int path_has_mount_or_drive(const char *path)
+{
+    const char *p;
+
+    if (!path) return 0;
+    for (p = path; *p && *p != '/' && *p != '\\'; ++p) {
+        if (*p == ':') return p != path;
+    }
+    return 0;
+}
+
+static int canonicalize_path(char *out, size_t out_size, const char *path)
+{
+    char normalized[EQVITA_APO_MAX_ERROR_PATH];
+    size_t component_rollback[EQVITA_APO_MAX_ERROR_PATH / 2];
+    size_t input_len;
+    size_t cursor = 0;
+    size_t output_len = 0;
+    size_t component_count = 0;
+    size_t colon = (size_t)-1;
+
+    if (!out || out_size == 0 || !path || !*path) {
+        return -1;
+    }
+    input_len = strlen(path);
+    if (input_len >= sizeof(normalized) || input_len >= out_size) {
+        return -1;
+    }
+    for (size_t i = 0; i <= input_len; ++i) {
+        normalized[i] = path[i] == '\\' ? '/' : path[i];
+    }
+
+    if (normalized[0] == '/') {
+        out[output_len++] = '/';
+        while (normalized[cursor] == '/') ++cursor;
+    } else {
+        for (size_t i = 0; normalized[i] && normalized[i] != '/'; ++i) {
+            if (normalized[i] == ':') {
+                colon = i;
+                break;
+            }
+        }
+        if (colon != (size_t)-1) {
+            if (colon + 1u >= out_size) return -1;
+            memcpy(out, normalized, colon + 1u);
+            output_len = colon + 1u;
+            cursor = colon + 1u;
+            if (normalized[cursor] == '/') {
+                out[output_len++] = '/';
+                while (normalized[cursor] == '/') ++cursor;
+            }
+        }
+    }
+
+    while (normalized[cursor]) {
+        size_t start;
+        size_t length;
+        size_t rollback;
+
+        while (normalized[cursor] == '/') ++cursor;
+        if (!normalized[cursor]) break;
+        start = cursor;
+        while (normalized[cursor] && normalized[cursor] != '/') ++cursor;
+        length = cursor - start;
+        if (length == 1u && normalized[start] == '.') continue;
+        if (length == 2u && normalized[start] == '.' && normalized[start + 1u] == '.') {
+            if (component_count == 0u) return -1;
+            output_len = component_rollback[--component_count];
+            out[output_len] = '\0';
+            continue;
+        }
+        if (component_count >= sizeof(component_rollback) / sizeof(component_rollback[0])) {
+            return -1;
+        }
+        rollback = output_len;
+        if (component_count > 0u) {
+            if (output_len + 1u >= out_size) return -1;
+            out[output_len++] = '/';
+        }
+        if (output_len + length >= out_size) return -1;
+        component_rollback[component_count++] = rollback;
+        memcpy(out + output_len, normalized + start, length);
+        output_len += length;
+        out[output_len] = '\0';
+    }
+
+    if (output_len == 0u || (component_count == 0u && output_len > 1u && out[output_len - 1u] == ':')) {
+        return -1;
+    }
+    out[output_len] = '\0';
+    return 0;
+}
+
+static int path_is_within_root(const char *path, const char *root)
+{
+    size_t root_len;
+
+    if (!path || !root) return 0;
+    root_len = strlen(root);
+    if (root_len == 0u) return 0;
+    for (size_t i = 0; i < root_len; ++i) {
+        if (!path[i] || ascii_tolower_local((unsigned char)path[i]) !=
+                        ascii_tolower_local((unsigned char)root[i])) {
+            return 0;
+        }
+    }
+    return path[root_len] == '\0' || path[root_len] == '/';
+}
+
+static int path_is_allowed(const apo_parse_context_t *ctx, const char *path)
+{
+    char root[EQVITA_APO_MAX_ERROR_PATH];
+
+    if (!ctx || !ctx->policy || !path) return 0;
+    for (size_t i = 0; i < ctx->policy->allowed_root_count; ++i) {
+        const char *allowed_root = ctx->policy->allowed_roots[i];
+        if (allowed_root && canonicalize_path(root, sizeof(root), allowed_root) == 0 &&
+            path_is_within_root(path, root)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int normalize_include_path(char *out, size_t out_size, const char *current_path, const char *include_name)
 {
-    char name[EQVITA_APO_MAX_ERROR_PATH];
-    const char *last_separator = NULL;
-    size_t directory_len = 0;
+    char joined[EQVITA_APO_MAX_ERROR_PATH];
+    const char *last_separator;
+    size_t directory_len;
     int written;
 
     if (!out || out_size == 0 || !include_name || !*include_name) {
         return -1;
     }
-    if (snprintf(name, sizeof(name), "%s", include_name) < 0) {
-        return -1;
+    if (include_name[0] == '/' || path_has_mount_or_drive(include_name)) {
+        return canonicalize_path(out, out_size, include_name);
     }
-    for (char *p = name; *p; ++p) {
-        if (*p == '\\') *p = '/';
-    }
-    if (name[0] == '/' || strchr(name, ':')) {
-        written = snprintf(out, out_size, "%s", name);
-        return written >= 0 && (size_t)written < out_size ? 0 : -1;
-    }
-    if (!current_path || !*current_path) {
-        return -1;
-    }
-    for (const char *p = current_path; *p; ++p) {
-        if (*p == '/' || *p == '\\') last_separator = p;
-    }
-    if (last_separator) {
-        directory_len = (size_t)(last_separator - current_path + 1);
-    } else if (strchr(current_path, ':')) {
-        directory_len = (size_t)(strchr(current_path, ':') - current_path + 1);
-    }
-    if (directory_len == 0 || directory_len >= out_size) {
-        return -1;
-    }
-    memcpy(out, current_path, directory_len);
-    out[directory_len] = '\0';
-    written = snprintf(out + directory_len, out_size - directory_len,
-                       "%s%s", out[directory_len - 1] == ':' ? "/" : "", name);
-    return written >= 0 && (size_t)written < out_size - directory_len ? 0 : -1;
+    if (!current_path || !*current_path) return -1;
+    last_separator = strrchr(current_path, '/');
+    if (!last_separator) return -1;
+    directory_len = (size_t)(last_separator - current_path);
+    written = snprintf(joined, sizeof(joined), "%.*s/%s",
+                       (int)directory_len, current_path, include_name);
+    if (written < 0 || (size_t)written >= sizeof(joined)) return -1;
+    return canonicalize_path(out, out_size, joined);
 }
 
-static int read_text_file(const char *path, char **out_text)
+static int read_text_file(const char *path, char **out_text, uint32_t *out_size)
 {
     unsigned int size;
     char *text;
 
-    if (!path || !out_text) {
+    if (!path || !out_text || !out_size) {
         return -1;
     }
 #ifdef EQVITA_HOST_TESTS
@@ -588,8 +696,15 @@ static int read_text_file(const char *path, char **out_text)
         long file_size;
         size_t read_size;
         if (!file) return -1;
-        if (fseek(file, 0, SEEK_END) != 0 || (file_size = ftell(file)) < 0 ||
-            file_size > (long)APO_MAX_FILE_BYTES || fseek(file, 0, SEEK_SET) != 0) {
+        if (fseek(file, 0, SEEK_END) != 0 || (file_size = ftell(file)) < 0) {
+            fclose(file);
+            return -1;
+        }
+        if (file_size > (long)EQVITA_APO_MAX_FILE_BYTES) {
+            fclose(file);
+            return -2;
+        }
+        if (fseek(file, 0, SEEK_SET) != 0) {
             fclose(file);
             return -1;
         }
@@ -612,8 +727,11 @@ static int read_text_file(const char *path, char **out_text)
         SceUID fd;
         int read_size;
         memset(&stat, 0, sizeof(stat));
-        if (sceIoGetstat(path, &stat) < 0 || stat.st_size < 0 || stat.st_size > APO_MAX_FILE_BYTES) {
+        if (sceIoGetstat(path, &stat) < 0 || stat.st_size < 0) {
             return -1;
+        }
+        if (stat.st_size > EQVITA_APO_MAX_FILE_BYTES) {
+            return -2;
         }
         size = (unsigned int)stat.st_size;
         text = (char *)malloc((size_t)size + 1u);
@@ -633,6 +751,7 @@ static int read_text_file(const char *path, char **out_text)
 #endif
     text[size] = '\0';
     *out_text = text;
+    *out_size = size;
     return 0;
 }
 
@@ -651,8 +770,14 @@ static int parse_include(apo_parse_context_t *ctx, char *parameters, const char 
     if (!*name) {
         return set_error(ctx, path, line, "Include path is empty");
     }
-    if (!path || normalize_include_path(include_path, sizeof(include_path), path, name) < 0) {
+    if (!path || !ctx->policy) {
         return set_error(ctx, path, line, "Include requires a file-based import");
+    }
+    if (normalize_include_path(include_path, sizeof(include_path), path, name) < 0) {
+        return set_error(ctx, path, line, "Invalid include path");
+    }
+    if (!path_is_allowed(ctx, include_path)) {
+        return set_error(ctx, path, line, "Include path is outside an allowed root");
     }
     ctx->result->include_count++;
     outer_channel_mask = ctx->channel_mask;
@@ -750,20 +875,41 @@ static int parse_document(apo_parse_context_t *ctx, const char *text, const char
 static int parse_file_recursive(apo_parse_context_t *ctx, const char *path, int depth)
 {
     char *text = NULL;
+    uint32_t text_size = 0;
+    int read_result;
     int result;
 
     if (depth >= APO_MAX_INCLUDE_DEPTH) {
         return set_error(ctx, path, 0, "Include nesting exceeds %d files", APO_MAX_INCLUDE_DEPTH);
     }
+    if (!path_is_allowed(ctx, path)) {
+        return set_error(ctx, path, 0, "Path is outside an allowed root");
+    }
     for (int i = 0; i < depth; ++i) {
-        if (strcmp(ctx->include_stack[i], path) == 0) {
+        if (ascii_equals(ctx->include_stack[i], path)) {
             return set_error(ctx, path, 0, "Include cycle detected");
         }
     }
-    if (snprintf(ctx->include_stack[depth], sizeof(ctx->include_stack[depth]), "%s", path) < 0 ||
-        read_text_file(path, &text) < 0) {
+    if (ctx->file_count >= ctx->policy->max_file_count) {
+        return set_error(ctx, path, 0, "Equalizer APO file limit exceeded");
+    }
+    ctx->file_count++;
+    if (snprintf(ctx->include_stack[depth], sizeof(ctx->include_stack[depth]), "%s", path) < 0) {
         return set_error(ctx, path, 0, "Could not read Equalizer APO file");
     }
+    read_result = read_text_file(path, &text, &text_size);
+    if (read_result == -2) {
+        return set_error(ctx, path, 0, "Equalizer APO file exceeds the 256 KiB limit");
+    }
+    if (read_result < 0) {
+        return set_error(ctx, path, 0, "Could not read Equalizer APO file");
+    }
+    if (text_size > ctx->policy->max_total_bytes ||
+        ctx->total_bytes > ctx->policy->max_total_bytes - text_size) {
+        free(text);
+        return set_error(ctx, path, 0, "Equalizer APO byte limit exceeded");
+    }
+    ctx->total_bytes += text_size;
     result = parse_document(ctx, text, path, depth);
     free(text);
     ctx->include_stack[depth][0] = '\0';
@@ -771,12 +917,14 @@ static int parse_file_recursive(apo_parse_context_t *ctx, const char *path, int 
 }
 
 static void init_context(apo_parse_context_t *ctx,
+                         const eqvita_apo_import_policy_t *policy,
                          const eq_control_t *base,
                          eqvita_apo_import_result_t *result)
 {
     memset(ctx, 0, sizeof(*ctx));
     memset(result, 0, sizeof(*result));
     ctx->result = result;
+    ctx->policy = policy;
     if (base && eq_control_is_compatible(base)) {
         ctx->control = *base;
     } else {
@@ -819,7 +967,7 @@ int eqvita_apo_parse_text(const char *text,
         return -1;
     }
     if (!result) result = &local_result;
-    init_context(&ctx, base, result);
+    init_context(&ctx, NULL, base, result);
     if (parse_document(&ctx, text, NULL, 0) < 0) {
         return -1;
     }
@@ -827,19 +975,31 @@ int eqvita_apo_parse_text(const char *text,
 }
 
 int eqvita_apo_import_file(const char *path,
+                           const eqvita_apo_import_policy_t *policy,
                            const eq_control_t *base,
                            eq_control_t *out,
                            eqvita_apo_import_result_t *result)
 {
     apo_parse_context_t ctx;
     eqvita_apo_import_result_t local_result;
+    char canonical_path[EQVITA_APO_MAX_ERROR_PATH];
 
-    if (!path || !out) {
+    if (!path || !policy || !out) {
         return -1;
     }
     if (!result) result = &local_result;
-    init_context(&ctx, base, result);
-    if (parse_file_recursive(&ctx, path, 0) < 0) {
+    init_context(&ctx, policy, base, result);
+    if (!policy->allowed_roots || policy->allowed_root_count == 0u ||
+        policy->max_file_count == 0u || policy->max_total_bytes == 0u) {
+        return set_error(&ctx, path, 0, "Invalid Equalizer APO import policy");
+    }
+    if (canonicalize_path(canonical_path, sizeof(canonical_path), path) < 0) {
+        return set_error(&ctx, path, 0, "Invalid Equalizer APO file path");
+    }
+    if (!path_is_allowed(&ctx, canonical_path)) {
+        return set_error(&ctx, canonical_path, 0, "Path is outside an allowed root");
+    }
+    if (parse_file_recursive(&ctx, canonical_path, 0) < 0) {
         return -1;
     }
     return finish_context(&ctx, out);

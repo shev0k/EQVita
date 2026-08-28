@@ -382,7 +382,8 @@ static void test_music_browser_copies_selected_path_before_opening(void)
     ASSERT_TRUE(strstr(source, "browser_async_start(NULL, 1, EQVITA_MEDIA_FILTER_AUDIO, NULL)") != NULL);
     ASSERT_TRUE(strstr(source, "browser_async_start(EQVITA_PEQ_DIR, 0,") != NULL);
     ASSERT_TRUE(strstr(source, "PRESETS_ROW_OUTPUT_PEQ") != NULL);
-    ASSERT_TRUE(strstr(source, "eqvita_apo_import_file(path, &base, &imported, &result)") != NULL);
+    ASSERT_TRUE(strstr(source,
+                       "eqvita_apo_import_file(path, &g_apo_import_policy, &base, &imported, &result)") != NULL);
     ASSERT_TRUE(strstr(source, "change_screen(SCREEN_ADVANCED)") != NULL);
 
     browser_case = strstr(source, "static void activate_current(void)");

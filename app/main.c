@@ -25,6 +25,8 @@
 #define APP_LOG_PATH EQVITA_DATA_DIR "/" EQVITA_APP_LOG_NAME
 #define BUNDLED_PEQ_NAME "pch-1000.txt"
 #define BUNDLED_PEQ_SOURCE "app0:assets/peq/pch-1000.txt"
+#define APO_IMPORT_MAX_FILES 32u
+#define APO_IMPORT_MAX_TOTAL_BYTES (512u * 1024u)
 #define STATUS_LOG_INTERVAL_US 5000000u
 #define STATUS_LOG_PREVIEW_INTERVAL_US 12000000u
 #define DIAGNOSTIC_DRAIN_INTERVAL_US 1000000u
@@ -36,6 +38,18 @@
 #define ANALOG_NAV_DEADZONE 60
 #define BROWSER_THREAD_PRIORITY 0x80
 #define BROWSER_THREAD_STACK (32 * 1024)
+
+static const char *const g_apo_import_roots[] = {
+    "ur0:data/",
+    "ux0:data/"
+};
+
+static const eqvita_apo_import_policy_t g_apo_import_policy = {
+    g_apo_import_roots,
+    sizeof(g_apo_import_roots) / sizeof(g_apo_import_roots[0]),
+    APO_IMPORT_MAX_FILES,
+    APO_IMPORT_MAX_TOTAL_BYTES
+};
 
 #define SCE_AVCONFIG_VOLCTRL_ONBOARD 1
 #define SCE_AVCONFIG_VOLCTRL_BLUETOOTH 2
@@ -1694,7 +1708,7 @@ static void import_equalizer_apo_file(const char *path)
     base.route_hint = EQ_ROUTE_UNKNOWN;
 
     memset(&result, 0, sizeof(result));
-    if (eqvita_apo_import_file(path, &base, &imported, &result) < 0) {
+    if (eqvita_apo_import_file(path, &g_apo_import_policy, &base, &imported, &result) < 0) {
         const char *error_file = eqvita_media_browser_file_name(
             result.error_path[0] ? result.error_path : path);
         if (result.error_line > 0) {
