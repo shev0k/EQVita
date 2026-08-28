@@ -47,11 +47,11 @@ static void test_defaults_are_compatible_and_safe(void) {
     ASSERT_TRUE(eq_control_is_compatible(&ctrl));
 }
 
-static void test_current_branch_uses_1_16_abi(void) {
+static void test_current_branch_uses_1_15_abi(void) {
     ASSERT_EQ_U32(EQ_VERSION_MAJOR, 1);
-    ASSERT_EQ_U32(EQ_VERSION_MINOR, 16);
+    ASSERT_EQ_U32(EQ_VERSION_MINOR, 15);
     ASSERT_EQ_U32(EQ_VERSION_PATCH, 0);
-    ASSERT_EQ_U32(EQ_ABI_VERSION, EQ_VERSION_PACK(1, 16));
+    ASSERT_EQ_U32(EQ_ABI_VERSION, EQ_VERSION_PACK(1, 15));
 }
 
 static void test_route_profile_bank_maps_all_three_outputs(void) {
@@ -116,38 +116,6 @@ static void test_route_profile_file_round_trips_names_and_curves(void) {
 
     file.source_names[0][0] ^= 1;
     ASSERT_TRUE(eq_route_profile_file_extract(&file, &loaded, loaded_names) < 0);
-}
-
-static void test_v1_15_wrapped_state_upgrades_without_losing_parametric_eq(void) {
-    eq_control_t control;
-    eq_control_t loaded;
-    eq_preset_file_t preset;
-    eq_boot_state_file_t boot;
-
-    eq_control_init_defaults(&control);
-    eq_control_set_parametric_mode(&control, 1);
-    control.enabled = 1;
-    control.preamp_mdB = -9600;
-    control.parametric_filters[0].type = EQ_FILTER_PEAK;
-    control.parametric_filters[0].channel_mask = EQ_CHANNEL_STEREO_MASK;
-    control.parametric_filters[0].data.filter.frequency_mHz = 3896000;
-    control.parametric_filters[0].data.filter.gain_mdB = 12500;
-    control.parametric_filters[0].data.filter.q_uQ = 782000;
-
-    eq_preset_build(&preset, &control);
-    preset.control.version = EQ_LEGACY_ABI_VERSION_1_15;
-    preset.checksum = eq_preset_checksum(&preset);
-    ASSERT_TRUE(eq_preset_extract_control(&preset, &loaded) == 0);
-    ASSERT_EQ_U32(loaded.version, EQ_ABI_VERSION);
-    ASSERT_EQ_I32(loaded.preamp_mdB, -9600);
-    ASSERT_EQ_U32(loaded.parametric_filters[0].data.filter.frequency_mHz, 3896000);
-
-    eq_boot_state_build(&boot, &control);
-    boot.control.version = EQ_LEGACY_ABI_VERSION_1_15;
-    boot.checksum = eq_boot_state_checksum(&boot);
-    ASSERT_TRUE(eq_boot_state_extract_control(&boot, &loaded) == 0);
-    ASSERT_EQ_U32(loaded.version, EQ_ABI_VERSION);
-    ASSERT_EQ_I32(loaded.parametric_filters[0].data.filter.gain_mdB, 12500);
 }
 
 static void test_validation_rejects_wrong_abi(void) {
@@ -687,10 +655,9 @@ static void test_boot_state_assumes_speaker_when_enabled_route_unknown(void) {
 
 int main(void) {
     test_defaults_are_compatible_and_safe();
-    test_current_branch_uses_1_16_abi();
+    test_current_branch_uses_1_15_abi();
     test_route_profile_bank_maps_all_three_outputs();
     test_route_profile_file_round_trips_names_and_curves();
-    test_v1_15_wrapped_state_upgrades_without_losing_parametric_eq();
     test_validation_rejects_wrong_abi();
     test_legacy_1_10_control_import_normalizes();
     test_legacy_1_11_control_imports();

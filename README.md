@@ -22,7 +22,7 @@ EQVita is a hobby homebrew project made to give the Vita a richer sound. It ship
 Install it, open the app, pick a preset, and make the Vita sound less flat.
 Nerd version: the plugin hooks `sceAudioOutOutput`, while the app handles presets, route hints, themes, logs, and boot state.
 
-Current app/plugin ABI: `1.16.0`.
+Current app/plugin ABI: `1.15.0`.
 
 Questions, setup help, preset sharing, and random EQVita ideas live in [Discussions](https://github.com/shev0k/EQVita/discussions). Issues are better for actual bugs with logs and steps.
 
@@ -135,7 +135,7 @@ If you make a preset that sounds nice, please share it in this repo's [Discussio
 The boot state is what lets the plugin load your saved sound after reboot, before you open the app again.
 
 Old raw `preset%d.bin` files are imported read-only when a matching `.eqvp` file does not exist.
-EQVita 1.16 also migrates wrapped presets and boot state written by versions 1.10 through 1.15.
+EQVita 1.15 also migrates wrapped presets and boot state written by versions 1.10 through 1.14.
 
 ## Equalizer APO Config Import
 

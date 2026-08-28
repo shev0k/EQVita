@@ -5,7 +5,7 @@
 #include <string.h>
 
 #define EQ_VERSION_MAJOR 1
-#define EQ_VERSION_MINOR 16
+#define EQ_VERSION_MINOR 15
 #define EQ_VERSION_PATCH 0
 
 #define EQ_BANDS 10
@@ -35,7 +35,6 @@
 #define EQ_LEGACY_ABI_VERSION_1_12 EQ_VERSION_PACK(1, 12)
 #define EQ_LEGACY_ABI_VERSION_1_13 EQ_VERSION_PACK(1, 13)
 #define EQ_LEGACY_ABI_VERSION_1_14 EQ_VERSION_PACK(1, 14)
-#define EQ_LEGACY_ABI_VERSION_1_15 EQ_VERSION_PACK(1, 15)
 #define EQ_LEGACY_CONTROL_SIZE 60u
 #define EQ_LEGACY_SHARED_BLOCK_SIZE 264u
 #define EQ_CONTROL_SIZE_V1_15 832u
@@ -662,17 +661,6 @@ static inline int eq_control_is_compatible(const eq_control_t *ctrl)
     return ctrl->version == EQ_ABI_VERSION && ctrl->size == sizeof(eq_control_t);
 }
 
-static inline int eq_control_upgrade_v1_15(eq_control_t *ctrl)
-{
-    if (!ctrl || ctrl->version != EQ_LEGACY_ABI_VERSION_1_15 ||
-        ctrl->size != EQ_CONTROL_SIZE_V1_15) {
-        return -1;
-    }
-    ctrl->version = EQ_ABI_VERSION;
-    ctrl->size = (uint32_t)sizeof(eq_control_t);
-    return 0;
-}
-
 static inline int eq_control_validate(eq_control_t *ctrl)
 {
     if (!eq_control_is_compatible(ctrl)) {
@@ -1172,10 +1160,6 @@ static inline int eq_preset_extract_control(const eq_preset_file_t *preset, eq_c
     }
 
     ctrl = raw;
-    if (ctrl.version == EQ_LEGACY_ABI_VERSION_1_15 &&
-        eq_control_upgrade_v1_15(&ctrl) < 0) {
-        return -1;
-    }
     if (eq_control_validate(&ctrl) < 0) {
         return -1;
     }
@@ -1274,10 +1258,6 @@ static inline int eq_boot_state_extract_control(const eq_boot_state_file_t *stat
     }
 
     ctrl = raw;
-    if (ctrl.version == EQ_LEGACY_ABI_VERSION_1_15 &&
-        eq_control_upgrade_v1_15(&ctrl) < 0) {
-        return -1;
-    }
     if (eq_control_validate(&ctrl) < 0) {
         return -1;
     }
