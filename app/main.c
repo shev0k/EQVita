@@ -3422,10 +3422,6 @@ int main(void)
     sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
     g_touch_panel_ready = (sceTouchGetPanelInfo(SCE_TOUCH_PORT_FRONT, &g_touch_panel) >= 0);
 
-    /* The weak syscall import remains callable when the kernel plugin is
-       absent or failed to load. It then leaves this zeroed version unchanged,
-       allowing the UI to report a mismatch instead of jumping through a null
-       import stub. */
     memset(&g_version, 0, sizeof(g_version));
     EqGetVersion(&g_version);
     g_control.route_hint = (uint8_t)detect_route_user();

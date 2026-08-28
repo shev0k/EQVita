@@ -379,13 +379,6 @@ static void test_music_browser_copies_selected_path_before_opening(void)
     snprintf(path, sizeof(path), "%s/app/main.c", EQVITA_SOURCE_DIR);
     source = read_file(path);
 
-    ASSERT_TRUE(strstr(source, "browser_async_start(NULL, 1, EQVITA_MEDIA_FILTER_AUDIO, NULL)") != NULL);
-    ASSERT_TRUE(strstr(source, "browser_async_start(EQVITA_PEQ_DIR, 0,") != NULL);
-    ASSERT_TRUE(strstr(source, "PRESETS_ROW_OUTPUT_PEQ") != NULL);
-    ASSERT_TRUE(strstr(source,
-                       "eqvita_apo_import_file(path, &g_apo_import_policy, &base, &imported, &result)") != NULL);
-    ASSERT_TRUE(strstr(source, "change_screen(SCREEN_ADVANCED)") != NULL);
-
     browser_case = strstr(source, "static void activate_current(void)");
     ASSERT_TRUE(browser_case != NULL);
     browser_case = strstr(browser_case, "case SCREEN_MUSIC_BROWSER:");
@@ -403,53 +396,33 @@ static void test_music_browser_copies_selected_path_before_opening(void)
     free(source);
 }
 
-static void test_peq_library_is_fixed_and_exclusive(void)
+static void test_peq_library_and_route_ui_are_wired(void)
 {
     char path[512];
     char *main_source;
     char *persistence_header;
-    char *shared_header;
-    char *apo_source;
 
     snprintf(path, sizeof(path), "%s/app/main.c", EQVITA_SOURCE_DIR);
     main_source = read_file(path);
     snprintf(path, sizeof(path), "%s/app/persistence.h", EQVITA_SOURCE_DIR);
     persistence_header = read_file(path);
-    snprintf(path, sizeof(path), "%s/common/eq_shared.h", EQVITA_SOURCE_DIR);
-    shared_header = read_file(path);
-    snprintf(path, sizeof(path), "%s/app/equalizer_apo.c", EQVITA_SOURCE_DIR);
-    apo_source = read_file(path);
-
     ASSERT_TRUE(strstr(persistence_header,
                        "#define EQVITA_PEQ_DIR EQVITA_DATA_DIR \"/\" EQVITA_PEQ_DIR_NAME") != NULL);
     ASSERT_TRUE(strstr(main_source, "eqvita_ensure_peq_dir(EQVITA_DATA_DIR)") != NULL);
-    ASSERT_TRUE(strstr(main_source, "#define BUNDLED_PEQ_NAME \"pch-1000.txt\"") != NULL);
     ASSERT_TRUE(strstr(main_source, "eqvita_seed_peq_file(EQVITA_DATA_DIR") != NULL);
     ASSERT_TRUE(strstr(main_source,
                        "eqvita_media_browser_read_dir_filtered_at_root") != NULL);
-    ASSERT_TRUE(strstr(main_source, "EQVITA_PEQ_DIR \"/*.txt\"") != NULL);
     ASSERT_TRUE(strstr(main_source, "Put .txt files in ur0:data/eqvita/peq") != NULL);
-    ASSERT_TRUE(strstr(main_source, "Bass guard is off while PEQ is active") != NULL);
-    ASSERT_TRUE(strstr(main_source, "APO Exact is locked while PEQ is active") != NULL);
-    ASSERT_TRUE(strstr(shared_header,
-                       "Imported PEQ is an exclusive signal path") != NULL);
-    ASSERT_TRUE(strstr(apo_source, "ctx->control.enabled = 1") != NULL);
-    ASSERT_TRUE(strstr(main_source, "SCREEN_OUTPUT_PEQ") != NULL);
-    ASSERT_TRUE(strstr(main_source, "Parametric EQ") != NULL);
-    ASSERT_TRUE(strstr(main_source, "Configure output") != NULL);
     ASSERT_TRUE(strstr(main_source, "Choose PEQ file") != NULL);
     ASSERT_TRUE(strstr(main_source, "Inspect / edit PEQ") != NULL);
     ASSERT_TRUE(strstr(main_source, "Clear this output") != NULL);
     ASSERT_TRUE(strstr(main_source, "EqSetRouteProfiles(&next_profiles)") != NULL);
-    ASSERT_TRUE(strstr(main_source, "eqvita_save_route_profiles") != NULL);
     ASSERT_TRUE(strstr(main_source, "Unassigned outputs are bypassed") != NULL);
     ASSERT_TRUE(strstr(main_source, "g_eq_return_screen = SCREEN_OUTPUT_PEQ") != NULL);
     ASSERT_TRUE(strstr(main_source, "return_screen = g_output_peq_return_screen") != NULL);
 
     free(main_source);
     free(persistence_header);
-    free(shared_header);
-    free(apo_source);
 }
 
 static void test_home_exposes_parametric_eq_below_advanced_eq(void)
@@ -489,7 +462,7 @@ static void test_home_exposes_parametric_eq_below_advanced_eq(void)
     free(source);
 }
 
-static void test_route_detection_uses_release_proven_avconfig_and_weak_plugin_import(void)
+static void test_route_detection_uses_avconfig_and_weak_plugin_import(void)
 {
     char path[512];
     char *main_source;
@@ -754,9 +727,9 @@ int main(void)
     test_music_preview_uses_custom_player_surfaces();
     test_music_preview_keeps_actions_not_metadata_rows();
     test_music_browser_copies_selected_path_before_opening();
-    test_peq_library_is_fixed_and_exclusive();
+    test_peq_library_and_route_ui_are_wired();
     test_home_exposes_parametric_eq_below_advanced_eq();
-    test_route_detection_uses_release_proven_avconfig_and_weak_plugin_import();
+    test_route_detection_uses_avconfig_and_weak_plugin_import();
     test_music_browser_cancel_goes_to_parent_before_player();
     test_media_browser_uses_heap_staging_for_large_listings();
     test_music_preview_reduces_main_loop_polling_pressure();

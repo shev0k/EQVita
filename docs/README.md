@@ -18,6 +18,7 @@ Start here when you forgot where things live.
 
 ## Audio
 
+- [Using Equalizer APO Configs](audio/equalizer-apo.md) - supported syntax, safe includes, route assignment, and clipping behavior.
 - [Audio Stability Notes](audio/audio-stability.md) - what matters in the audio hook and how to read stability logs.
 - [Known Limits](audio/known-limits.md) - honest notes about hardware testing, output routes, and what CI cannot prove.
 

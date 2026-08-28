@@ -53,10 +53,10 @@ The theme switcher exists because staring at EQ sliders should at least look cle
 ## Features
 
 - 10-band graphic EQ from `31 Hz` to `16 kHz`.
-- Equalizer APO `.txt` import with up to 48 ordered parametric/filter-matrix operations.
-- Separate route-selected PEQ profiles for Vita speakers, wired headphones, and Bluetooth audio.
+- Equalizer APO `.txt` import for parametric EQ profiles.
+- Separate PEQ profiles for speakers, wired headphones, and Bluetooth.
 - Simple EQ mode for bass, mids, treble, and preamp.
-- Advanced EQ mode for every graphic band or every imported parametric operation.
+- Advanced EQ mode for every band and preamp.
 - Built-in `STOCK Depth` and `MOD Switch` presets.
 - Preset slots with save/load support.
 - Music Preview for playing a local `OGG`, `MP3`, or `WAV` while tuning EQ.
@@ -121,8 +121,8 @@ Files you may see there:
 - `boot.eqbs` - boot state.
 - `theme.cfg` - selected app theme.
 - `app.log` - useful log for bug reports.
-- `peq/` - user Equalizer APO `.txt` configs.
-- `output-peq.eqpf` - validated output-to-PEQ assignments and curves.
+- `peq/` - Equalizer APO `.txt` profiles.
+- `output-peq.eqpf` - saved output-to-profile assignments.
 
 There are three preset slots. EQ changes apply live, and saving writes the current settings into the selected slot.
 
@@ -135,39 +135,20 @@ If you make a preset that sounds nice, please share it in this repo's [Discussio
 The boot state is what lets the plugin load your saved sound after reboot, before you open the app again.
 
 Old raw `preset%d.bin` files are imported read-only when a matching `.eqvp` file does not exist.
-EQVita 1.15 also migrates wrapped presets and boot state written by versions 1.10 through 1.14.
 
-## Equalizer APO Config Import
+## Equalizer APO Profiles
 
-EQVita creates this directory when the app starts:
+Put Equalizer APO `.txt` files in:
 
 ```text
 ur0:data/eqvita/peq/
 ```
 
-Copy Equalizer APO `.txt` files there with VitaShell. Then open `Parametric EQ` directly below `Advanced EQ` on the home screen. Choose `Vita speakers`, `Wired headphones`, or `Bluetooth audio`, select `Choose PEQ file`, and pick the `.txt`. Repeat for any other outputs. The browser is rooted at the PEQ directory, so it does not make you search every Vita storage device. Subdirectories are allowed for organised config libraries and relative `Include` files. `Presets` also retains a `Parametric EQ` shortcut to the same screen.
+Open `Parametric EQ`, choose speakers, wired headphones, or Bluetooth, then pick a file. You can give every output its own curve. If an output has no profile while PEQ routing is active, EQVita leaves that output alone instead of borrowing the wrong curve.
 
-The app installs the measurement-derived PCH-1000 speaker preset as `peq/pch-1000.txt` the first time it runs. If that file already exists, EQVita leaves it untouched so edits and replacements are never overwritten.
+One important bit: imported profiles use `APO Exact`. It keeps the file's preamp and filter order, then hard-clips anything that runs past the 16-bit output range. If it sounds crunchy, lower `Preamp` in the profile.
 
-Selecting a file enables EQ, assigns it only to the chosen output, and applies the curve live when that route is active. Use `Inspect / edit PEQ` to open its Advanced EQ operations. PEQ is exclusive: all 10 graphic-EQ bands are cleared, Bass guard is disabled, and `APO Exact` is locked so the `.txt` preamp and ordered operations are the only active filters. Adjusting Simple EQ deliberately leaves PEQ mode for the selected output and switches that profile to the 10-band equalizer.
-
-Output assignments and their live edits are stored in `output-peq.eqpf` without overwriting a numbered preset slot. The kernel plugin loads that file at boot. Once at least one output profile is assigned, unassigned outputs are deliberately bypassed instead of inheriting the wrong device's curve. `Clear this output` removes one assignment; clearing the final assignment returns to normal speaker-only/all-output mode with EQ off.
-
-The importer supports the Equalizer APO syntax used by headphone and speaker PEQ exports:
-
-- `Preamp`, including multiple lines whose dB values accumulate;
-- numbered or unnumbered `Filter` commands using `PK`/`PEQ`, `LS`/`LSC`, and `HS`/`HSC`;
-- Q-based shelves, shelf slopes, and Equalizer APO's default shelf `S = 0.9` behavior;
-- `Channel: L`, `Channel: R`, and `Channel: L R` for separate left/right filters;
-- ordered stereo `Copy` expressions such as polarity inversion, channel swap, `R=L`, and weighted L/R mono mixes;
-- relative `Include` files, nested up to eight levels;
-- comments and `OFF` filters.
-
-`Device` lines are intentionally ignored because Vita output routing does not use Windows device identifiers. Other active Equalizer APO commands and filter types are rejected with a file/line error instead of being silently approximated. In particular, this release does not import `GraphicEQ`, convolution, delay, channel-scoped preamps, constant-valued `Copy` expressions, dB-valued `Copy` coefficients, or channels beyond L/R.
-
-Limits are 48 active `Filter` plus `Copy` operations, `1` to `24000 Hz`, `-24` to `+24 dB` filter gain, Q/S values from `0.01` to `100` (shelf slopes `0.12` to `12 dB/octave`), `-30` to `+12 dB` combined preamp, and `Copy` coefficients from `-4` to `+4`. Frequencies above the current stream's Nyquist limit are constrained at runtime. Imported configs force the exclusive PEQ path on every validation and load, so stale preset data cannot silently re-enable graphic bands, Bass guard, or automatic headroom processing.
-
-The filter naming and shelf behavior follow the [Equalizer APO configuration reference](https://sourceforge.net/p/equalizerapo/wiki/Configuration%20reference/).
+The importer supports the useful stereo subset, not every Equalizer APO command. See [Using Equalizer APO Configs](docs/audio/equalizer-apo.md) for supported filters, `Copy`, `Include`, limits, and troubleshooting.
 
 ## Music Preview
 
@@ -192,13 +173,10 @@ Notes:
 
 `All outputs` mode also allows wired headphones and Bluetooth output.
 
-For different curves per device, open `Parametric EQ` from the home screen. The plugin detects wired insertion directly. While EQVita is open, the app uses the same AVConfig route query as the official v1.14 app to distinguish speakers, wired output, and Bluetooth, and sends that route hint to the plugin. The last validated hint is saved for boot-time use; wired insertion always overrides it in the kernel. Route changes smooth into the new DSP targets; no Equalizer APO `Device:` line is needed.
-
 If EQ is bypassed, the app tries to show why. Common reasons are:
 
 - EQ is turned off.
 - The selected output mode does not match the current route.
-- Output PEQ mode is active but the current output has no assigned profile.
 - The output port is unknown or busy.
 - The audio format is unsupported.
 - The app and plugin ABI do not match.
@@ -287,12 +265,6 @@ Host tests:
 
 ```bash
 EQVITA_BUILD_TYPE=Debug bash scripts/test-host-wsl.sh
-```
-
-Run the Equalizer APO fixture and coefficient checks as ARMv7 Cortex-A9 code with `qemu-arm`:
-
-```bash
-bash scripts/test-armv7-qemu.sh
 ```
 
 Release checks:

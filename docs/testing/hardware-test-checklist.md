@@ -11,6 +11,8 @@ For devs: host tests do not prove kernel audio timing, so real hardware still ge
 - Install the matching `eq_speaker.skprx` and `EQVita.vpk` from the same build.
 - Confirm the app shows the expected ABI/version from [README.md](../../README.md).
 - Keep a copy of `ur0:data/eqvita/app.log` after testing.
+- Record the Vita model, firmware, test duration, and exact Release artifact checksums.
+- Plan passes for speakers, wired headphones, Bluetooth, and PSPemu. A missing route is a missing release check, not an automatic pass.
 
 ## Boot And Launch
 
@@ -38,15 +40,18 @@ For devs: host tests do not prove kernel audio timing, so real hardware still ge
 - Start EQVita once and confirm it creates `ur0:data/eqvita/peq/` and seeds `pch-1000.txt`.
 - Copy the configs under `tests/fixtures/equalizer_apo/` into that directory.
 - Confirm `Parametric EQ` appears directly below `Advanced EQ` on the home screen. Open it, select each output in turn, and confirm `Choose PEQ file` lists `.txt` files directly without showing storage roots.
-- Import `real_01.txt` and confirm 15 filters, `-9.6 dB` preamp, and `APO Exact` appear in Advanced EQ.
+- Import `mixed_syntax.txt` and confirm 10 filters, `-9 dB`, and `APO Exact` appear in Advanced EQ.
 - Confirm selecting PEQ turns EQ on, clears every 10-band gain, disables Bass guard, and prevents changing APO Exact while PEQ remains active.
-- Import `real_02.txt` and confirm polarity inversion plus 31 filters apply without a crash or audio dropout.
-- Import `real_04.txt` and verify the final L/R channel-specific filters and channel-swap `Copy` operation are listed in order.
-- Import `real_05.txt` and stress its 39 filters on speakers, wired output, and Bluetooth where available.
+- Import `dense_filter_bank.txt` and confirm 31 filters plus Copy with `-12 dB` applies without a crash or dropout.
+- Import `channel_and_order.txt` and confirm six filters plus channel swap with `-2.5 dB` stay in file order.
+- Import `near_capacity_channels.txt` and confirm all 39 filters with `-15 dB` apply.
+- Import `high_q_filters.txt` and listen for instability or persistent ringing beyond what the curve itself requests.
 - Play a stereo channel-identification track and verify `Channel: L` changes only left, `Channel: R` changes only right, and `Copy: L=R R=L` swaps them.
 - Test polarity inversion and both mono-mix forms with a correlation/phase test track if available.
 - Save an imported curve to a preset slot, reboot, and confirm the parametric curve survives boot.
 - Import a config with a missing `Include` and one with an unsupported command; confirm both report the source file and line instead of partially applying.
+- With an imported profile assigned, use Simple EQ. Confirm the old `.txt` name disappears, then reboot or reload the route profiles and confirm it stays gone.
+- Drive a normal graphic mode into clipping and confirm nonzero soft-limit telemetry. Repeat with APO Exact and confirm nonzero hard-clip telemetry.
 
 ## Music Preview
 
@@ -66,12 +71,14 @@ For devs: host tests do not prove kernel audio timing, so real hardware still ge
 
 - Test Speakers mode on the Vita speakers.
 - Test All outputs mode with wired headphones if available.
-- Test Bluetooth if available.
+- Test Bluetooth.
+- Test playback from PSPemu as well as a native Vita app or game.
 - Confirm labels in the app match the selected mode.
 - Assign visibly different PEQs to speakers, wired headphones, and Bluetooth. With EQVita open, play continuously while connecting/disconnecting each output and confirm the matching curve fades in.
+- Repeat route connect/disconnect checks with EQVita closed, then reopen it and confirm the saved/current route settles correctly.
 - Leave one output unassigned and confirm it reports `No PEQ for this output` and stays unprocessed instead of borrowing another route's curve.
 - Reboot with all three assignments, start audio before opening EQVita, and confirm `output-peq.eqpf` is loaded by the plugin.
-- Suspend and resume with Bluetooth connected, then disconnect it while EQVita is open and confirm the speaker profile becomes active after the route refresh.
+- Suspend and resume on each route. With Bluetooth connected, disconnect it while EQVita is open and confirm the speaker profile becomes active after the route refresh.
 
 ## Audio Stability
 
@@ -80,6 +87,7 @@ For devs: host tests do not prove kernel audio timing, so real hardware still ge
 - Open, minimize, and close a few apps.
 - Start a heavier game and listen during loading screens, menus, and notifications.
 - Watch for clipping, crackle, audio dropouts, or EQ randomly bypassing.
+- Run `near_capacity_channels.txt` long enough to expose timing trouble. Record the duration and require no crash, dropout, persistent distortion, slow-block diagnostic, or invalid DSP state.
 
 ## Game Stress Flow
 
@@ -133,6 +141,8 @@ What to report:
 - Whether opening and closing the official Settings app cleared the issue.
 - The exact preset, preamp, output mode, and whether EQ was enabled.
 - Any `diag-core:`, `diag-time:`, and `diag-level:` lines near the run where the issue happened.
+
+For the PR acceptance record, attach the completed matrix with Vita model, firmware, duration, routes, fixtures, clipping telemetry, and relevant log excerpts. Speakers, wired, Bluetooth, PSPemu, and the near-capacity run must all have evidence before merge.
 
 ## Logs
 

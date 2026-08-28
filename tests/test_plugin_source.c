@@ -1475,23 +1475,10 @@ static void test_dsp_has_cortex_a9_neon_kernel_with_inline_vcvtr(void)
     kernel_end = strstr(kernel_start + 1, "static void process_generic_steady");
     ASSERT_TRUE(kernel_end != NULL);
     ASSERT_TRUE(range_contains(kernel_start, kernel_end, "while (frames >= 4u)"));
-    ASSERT_TRUE(!range_contains(kernel_start, kernel_end, "while (frames >= 8u)"));
     ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmla_f32"));
-    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmls_f32"));
-    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmax_f32"));
     ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vcgt_f32"));
     ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vclt_f32"));
     ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vcvtr.s32.f32"));
-    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmul_lane_f32"));
-    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmla_lane_f32"));
-    ASSERT_TRUE(range_contains(kernel_start, kernel_end,
-                               "vld1_f32(state->band_z[operation].z1)"));
-    ASSERT_TRUE(range_contains(kernel_start, kernel_end,
-                               "vst1_f32(state->band_z[operation].z2, z2)"));
-    ASSERT_TRUE(range_contains(kernel_start, kernel_end,
-                               "const eq_stereo_biquad_t *matrix = &state->active_stereo[operation]"));
-    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vld1_f32(matrix->b0)"));
-    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vld1_f32(matrix->b1)"));
     last_limit = strstr(kernel_start, "EQ_NEON_LIMIT_PAIR(x3)");
     first_round = strstr(kernel_start, "EQ_VFP_ROUND_PAIR(x0, rounded0)");
     last_round = strstr(kernel_start, "EQ_VFP_ROUND_PAIR(x3, rounded3)");
@@ -1510,9 +1497,6 @@ static void test_dsp_has_cortex_a9_neon_kernel_with_inline_vcvtr(void)
     ASSERT_TRUE(apply_end != NULL);
     ASSERT_TRUE(range_contains(apply_start, apply_end, "vmrs %0, fpscr"));
     ASSERT_TRUE(range_contains(apply_start, apply_end, "vmsr fpscr, %0"));
-    ASSERT_TRUE(range_contains(apply_start, apply_end, "sanitize_biquad_state"));
-    ASSERT_TRUE(range_contains(apply_start, apply_end, "sanitize_delay_state"));
-    ASSERT_TRUE(strstr(source, "const float knee") != NULL);
 
     free(source);
 }

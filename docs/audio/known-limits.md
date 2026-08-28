@@ -16,12 +16,12 @@ For people who want the details: host tests catch shared logic bugs, but they ca
 
 ## Equalizer APO Import
 
-- Supported commands and numeric limits are documented in the README.
+- Supported commands, paths, and numeric limits are documented in [Using Equalizer APO Configs](equalizer-apo.md).
 - Windows `Device` selectors are ignored; every active non-device line is treated as part of the Vita curve.
 - Unsupported active commands fail the import instead of being silently approximated.
 - PEQ configs are selected from `ur0:data/eqvita/peq/`. The app creates that directory automatically.
 - Speaker, wired, and Bluetooth assignments are stored in `ur0:data/eqvita/output-peq.eqpf`; unassigned routes bypass while output-profile mode is active.
-- Imported PEQ is exclusive: graphic bands and Bass guard are disabled, and APO Exact preserves the config's requested preamp.
+- Imported PEQ is exclusive: graphic bands and Bass guard are disabled, and APO Exact preserves the config's requested preamp. APO Exact hard-saturates out-of-range PCM; normal modes use the soft limiter.
 - L/R `Copy` matrices and channel-specific filters are stereo features. Mono Vita streams retain the left-channel path.
 - Frequencies at or above the current stream's Nyquist frequency are constrained to a stable value below Nyquist.
 
