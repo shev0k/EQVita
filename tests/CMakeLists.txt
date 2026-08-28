@@ -86,6 +86,7 @@ add_test(NAME app_state COMMAND test_app_state)
 
 add_executable(test_app_persistence
   test_app_persistence.c
+  ${CMAKE_SOURCE_DIR}/app/app_state.c
   ${CMAKE_SOURCE_DIR}/app/persistence.c
 )
 

@@ -151,3 +151,43 @@ int eqvita_app_state_status_stale(const eqvita_app_state_t *state)
 {
     return state ? state->status_stale != 0 : 0;
 }
+
+int eqvita_app_state_prepare_route_profile_candidate(
+    const eq_route_profile_bank_t *current_bank,
+    const char current_source_names[EQ_ROUTE_PROFILE_COUNT][EQ_ROUTE_PROFILE_SOURCE_NAME_MAX],
+    uint8_t route,
+    const eq_control_t *control,
+    eq_route_profile_bank_t *out_bank,
+    char out_source_names[EQ_ROUTE_PROFILE_COUNT][EQ_ROUTE_PROFILE_SOURCE_NAME_MAX])
+{
+    int profile_index;
+    eq_route_profile_bank_t validated_bank;
+    eq_control_t validated_control;
+
+    if (!current_bank || !current_source_names || !control || !out_bank || !out_source_names) {
+        return -1;
+    }
+    validated_bank = *current_bank;
+    validated_control = *control;
+    if (eq_route_profile_bank_validate(&validated_bank) < 0 ||
+        eq_control_validate(&validated_control) < 0) return -1;
+    profile_index = eq_route_profile_index(route);
+    if (profile_index < 0 || !eq_route_profile_bank_has_route(&validated_bank, route)) {
+        return -1;
+    }
+
+    *out_bank = validated_bank;
+    memcpy(out_source_names, current_source_names,
+           EQ_ROUTE_PROFILE_COUNT * EQ_ROUTE_PROFILE_SOURCE_NAME_MAX);
+    out_bank->profiles[profile_index] = validated_control;
+    out_bank->profiles[profile_index].enabled = 1;
+    out_bank->profiles[profile_index].speaker_only = 0;
+    out_bank->profiles[profile_index].route_hint = EQ_ROUTE_UNKNOWN;
+    out_bank->profiles[profile_index].dirty_counter = 0;
+    out_bank->selected_route = route;
+    if (validated_control.eq_mode == EQ_MODE_GRAPHIC) {
+        out_source_names[profile_index][0] = '\0';
+    }
+    eq_route_profile_bank_touch(out_bank);
+    return eq_route_profile_bank_validate(out_bank);
+}

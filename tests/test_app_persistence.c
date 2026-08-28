@@ -1,4 +1,5 @@
 #include "../app/persistence.h"
+#include "../app/app_state.h"
 #include "../common/eq_shared.h"
 
 #include <stdint.h>
@@ -539,6 +540,49 @@ static void test_output_peq_profiles_persist_atomically(void)
     free(dir);
 }
 
+static void test_graphic_route_candidate_clears_source_and_persists(void)
+{
+    char *dir = make_temp_dir();
+    eq_route_profile_bank_t bank;
+    eq_route_profile_bank_t candidate_bank;
+    eq_route_profile_bank_t loaded_bank;
+    eq_control_t graphic;
+    char names[EQ_ROUTE_PROFILE_COUNT][EQ_ROUTE_PROFILE_SOURCE_NAME_MAX] = {{0}};
+    char candidate_names[EQ_ROUTE_PROFILE_COUNT][EQ_ROUTE_PROFILE_SOURCE_NAME_MAX] = {{0}};
+    char loaded_names[EQ_ROUTE_PROFILE_COUNT][EQ_ROUTE_PROFILE_SOURCE_NAME_MAX] = {{0}};
+
+    eq_route_profile_bank_init(&bank);
+    bank.enabled_mask = eq_route_profile_bit(EQ_ROUTE_SPEAKER);
+    bank.selected_route = EQ_ROUTE_SPEAKER;
+    eq_control_set_parametric_mode(&bank.profiles[0], 1);
+    snprintf(names[0], sizeof(names[0]), "old-profile.txt");
+
+    graphic = bank.profiles[0];
+    eq_control_set_graphic_mode(&graphic);
+    ASSERT_TRUE(eqvita_app_state_prepare_route_profile_candidate(
+                    &bank, names, EQ_ROUTE_SPEAKER, &graphic,
+                    &candidate_bank, candidate_names) == 0);
+    ASSERT_EQ_I32(candidate_bank.profiles[0].eq_mode, EQ_MODE_GRAPHIC);
+    ASSERT_TRUE(candidate_names[0][0] == '\0');
+
+    /* Discarding a failed sync candidate must leave the live state untouched. */
+    ASSERT_EQ_I32(bank.profiles[0].eq_mode, EQ_MODE_PARAMETRIC);
+    ASSERT_TRUE(strcmp(names[0], "old-profile.txt") == 0);
+
+    ASSERT_TRUE(eqvita_save_route_profiles(dir, &candidate_bank, candidate_names) == 0);
+    ASSERT_TRUE(eqvita_load_route_profiles(dir, &loaded_bank, loaded_names) == 0);
+    ASSERT_EQ_I32(loaded_bank.profiles[0].eq_mode, EQ_MODE_GRAPHIC);
+    ASSERT_TRUE(loaded_names[0][0] == '\0');
+
+    {
+        char path[256];
+        path_join(path, sizeof(path), dir, EQVITA_OUTPUT_PEQ_NAME);
+        ASSERT_TRUE(unlink(path) == 0);
+    }
+    ASSERT_TRUE(rmdir(dir) == 0);
+    free(dir);
+}
+
 int main(void)
 {
     test_startup_load_prefers_boot_state_over_preset0();
@@ -555,5 +599,6 @@ int main(void)
     test_log_append_rotates_when_cap_is_exceeded();
     test_peq_directory_is_created_under_data_dir();
     test_output_peq_profiles_persist_atomically();
+    test_graphic_route_candidate_clears_source_and_persists();
     return failures ? 1 : 0;
 }

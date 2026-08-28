@@ -1154,6 +1154,7 @@ static int apply_control_candidate(const eq_control_t *candidate, int mark_boot_
     int status_res;
     eq_control_t next;
     eq_route_profile_bank_t next_profiles;
+    char next_profile_sources[EQ_ROUTE_PROFILE_COUNT][EQ_ROUTE_PROFILE_SOURCE_NAME_MAX];
 
     if (!g_plugin_compatible) {
         set_message("Plugin version mismatch");
@@ -1167,17 +1168,17 @@ static int apply_control_candidate(const eq_control_t *candidate, int mark_boot_
     next.route_hint = (uint8_t)detect_route_user();
     next.dirty_counter = eq_control_next_dirty_counter(g_control.dirty_counter);
     next_profiles = g_route_profiles;
+    memcpy(next_profile_sources, g_route_profile_sources, sizeof(next_profile_sources));
 
     if (mark_boot_dirty_on_success &&
         eq_route_profile_bank_has_route(&next_profiles, g_route_profile_edit_route)) {
-        int profile_index = eq_route_profile_index(g_route_profile_edit_route);
-        next_profiles.profiles[profile_index] = next;
-        next_profiles.profiles[profile_index].enabled = 1;
-        next_profiles.profiles[profile_index].speaker_only = 0;
-        next_profiles.profiles[profile_index].route_hint = EQ_ROUTE_UNKNOWN;
-        next_profiles.profiles[profile_index].dirty_counter = 0;
-        next_profiles.selected_route = g_route_profile_edit_route;
-        eq_route_profile_bank_touch(&next_profiles);
+        if (eqvita_app_state_prepare_route_profile_candidate(
+                &g_route_profiles, g_route_profile_sources,
+                g_route_profile_edit_route, &next,
+                &next_profiles, next_profile_sources) < 0) {
+            set_message("Output PEQ state is invalid");
+            return -1;
+        }
     }
     if (eq_route_profile_bank_validate(&next_profiles) < 0) {
         set_message("Output PEQ state is invalid");
@@ -1199,6 +1200,7 @@ static int apply_control_candidate(const eq_control_t *candidate, int mark_boot_
 
     g_control = next;
     g_route_profiles = next_profiles;
+    memcpy(g_route_profile_sources, next_profile_sources, sizeof(g_route_profile_sources));
     if (mark_boot_dirty_on_success) {
         mark_boot_state_dirty();
         eqvita_app_state_mark_current_preset_dirty(&g_app_state);
