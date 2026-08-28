@@ -769,9 +769,13 @@ static void test_output_hook_does_not_restore_caller_buffer_after_original_outpu
 
     ASSERT_TRUE(!range_contains(copy_original, hook_end, "memcpy(processing_port->scratch, processing_port->original, processing_bytes)"));
 
-    apply_to_call = strstr(copy_original, "eq_dsp_apply_to(&processing_port->dsp, processing_port->original, processing_port->scratch");
+    apply_to_call = strstr(copy_original, "eq_dsp_apply_to(&processing_port->dsp");
     ASSERT_TRUE(apply_to_call != NULL);
     ASSERT_TRUE(apply_to_call < hook_end);
+    ASSERT_TRUE(range_contains(apply_to_call, hook_end,
+                               "eq_control_get_headroom_mode(&control) == EQ_HEADROOM_EXACT"));
+    ASSERT_TRUE(range_contains(apply_to_call, hook_end, "EQ_DSP_OUTPUT_HARD_CLIP"));
+    ASSERT_TRUE(range_contains(apply_to_call, hook_end, "EQ_DSP_OUTPUT_SOFT_LIMIT"));
 
     copy_processed = strstr(apply_to_call, "ksceKernelCopyToUser((void *)buf, processing_port->scratch, processing_bytes)");
     ASSERT_TRUE(copy_processed != NULL);
@@ -1429,23 +1433,15 @@ static void test_dsp_apply_has_stereo_steady_state_fast_path(void)
     free(source);
 }
 
-static void test_dsp_hot_sample_helpers_avoid_finite_checks(void)
+static void test_dsp_hot_biquad_helper_avoids_finite_checks(void)
 {
     char path[512];
     char *source;
-    char *clip_start;
-    char *clip_end;
     char *biquad_start;
     char *biquad_end;
 
     snprintf(path, sizeof(path), "%s/plugin/dsp.c", EQVITA_SOURCE_DIR);
     source = read_file(path);
-
-    clip_start = strstr(source, "static inline int16_t hard_clip_i16");
-    ASSERT_TRUE(clip_start != NULL);
-    clip_end = strstr(clip_start + 1, "static inline uint16_t abs_i16_peak");
-    ASSERT_TRUE(clip_end != NULL);
-    ASSERT_TRUE(!range_contains(clip_start, clip_end, "isfinite"));
 
     biquad_start = strstr(source, "static inline float process_biquad");
     ASSERT_TRUE(biquad_start != NULL);
@@ -1464,7 +1460,7 @@ static void test_dsp_has_cortex_a9_neon_kernel_with_inline_vcvtr(void)
     char *kernel_end;
     char *apply_start;
     char *apply_end;
-    char *last_clamp;
+    char *last_limit;
     char *first_round;
     char *last_round;
     char *first_narrow;
@@ -1483,7 +1479,8 @@ static void test_dsp_has_cortex_a9_neon_kernel_with_inline_vcvtr(void)
     ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmla_f32"));
     ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmls_f32"));
     ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmax_f32"));
-    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmin_f32"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vcgt_f32"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vclt_f32"));
     ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vcvtr.s32.f32"));
     ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmul_lane_f32"));
     ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmla_lane_f32"));
@@ -1495,15 +1492,15 @@ static void test_dsp_has_cortex_a9_neon_kernel_with_inline_vcvtr(void)
                                "const eq_stereo_biquad_t *matrix = &state->active_stereo[operation]"));
     ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vld1_f32(matrix->b0)"));
     ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vld1_f32(matrix->b1)"));
-    last_clamp = strstr(kernel_start, "EQ_NEON_CLAMP_PAIR(x3)");
+    last_limit = strstr(kernel_start, "EQ_NEON_LIMIT_PAIR(x3)");
     first_round = strstr(kernel_start, "EQ_VFP_ROUND_PAIR(x0, rounded0)");
     last_round = strstr(kernel_start, "EQ_VFP_ROUND_PAIR(x3, rounded3)");
     first_narrow = strstr(kernel_start, "packed0 = vmovn_s32");
-    ASSERT_TRUE(last_clamp != NULL);
+    ASSERT_TRUE(last_limit != NULL);
     ASSERT_TRUE(first_round != NULL);
     ASSERT_TRUE(last_round != NULL);
     ASSERT_TRUE(first_narrow != NULL);
-    ASSERT_TRUE(last_clamp < first_round);
+    ASSERT_TRUE(last_limit < first_round);
     ASSERT_TRUE(first_round < last_round);
     ASSERT_TRUE(last_round < first_narrow);
     ASSERT_TRUE(!range_contains(kernel_start, kernel_end, "vfma"));
@@ -1513,9 +1510,9 @@ static void test_dsp_has_cortex_a9_neon_kernel_with_inline_vcvtr(void)
     ASSERT_TRUE(apply_end != NULL);
     ASSERT_TRUE(range_contains(apply_start, apply_end, "vmrs %0, fpscr"));
     ASSERT_TRUE(range_contains(apply_start, apply_end, "vmsr fpscr, %0"));
-    ASSERT_TRUE(!range_contains(apply_start, apply_end, "sanitize_biquad_state"));
-    ASSERT_TRUE(!range_contains(apply_start, apply_end, "flush_denormal_delay_state"));
-    ASSERT_TRUE(strstr(source, "const float knee") == NULL);
+    ASSERT_TRUE(range_contains(apply_start, apply_end, "sanitize_biquad_state"));
+    ASSERT_TRUE(range_contains(apply_start, apply_end, "sanitize_delay_state"));
+    ASSERT_TRUE(strstr(source, "const float knee") != NULL);
 
     free(source);
 }
@@ -1717,7 +1714,7 @@ int main(void)
     test_dsp_apply_has_steady_state_fast_path();
     test_dsp_state_caches_active_band_indexes();
     test_dsp_apply_has_stereo_steady_state_fast_path();
-    test_dsp_hot_sample_helpers_avoid_finite_checks();
+    test_dsp_hot_biquad_helper_avoids_finite_checks();
     test_dsp_has_cortex_a9_neon_kernel_with_inline_vcvtr();
     test_speaker_retarget_honors_hpf_control_before_folding_31hz();
     test_output_hook_records_slowest_block_context();

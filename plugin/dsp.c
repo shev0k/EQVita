@@ -372,14 +372,73 @@ static int sanitize_biquad_state(eq_dsp_state_t *state) {
     return active_changed;
 }
 
-static inline int16_t hard_clip_i16(float x) {
-    if (x > 32767.0f) {
-        x = 32767.0f;
-    } else if (x < -32768.0f) {
-        x = -32768.0f;
+static void sanitize_delay_state(eq_dsp_state_t *state, uint32_t channels) {
+    if (!state) {
+        return;
+    }
+    if (channels > EQ_DSP_MAX_CHANNELS) {
+        channels = EQ_DSP_MAX_CHANNELS;
     }
 
-    return (int16_t)lrintf(x);
+    for (uint32_t channel = 0; channel < channels; ++channel) {
+        float *hpf_z1 = &state->hpf_z.z1[channel];
+        float *hpf_z2 = &state->hpf_z.z2[channel];
+        if (!isfinite(*hpf_z1) || fabsf(*hpf_z1) < 1e-15f) *hpf_z1 = 0.0f;
+        if (!isfinite(*hpf_z2) || fabsf(*hpf_z2) < 1e-15f) *hpf_z2 = 0.0f;
+
+        for (uint8_t index = 0; index < state->active_band_count; ++index) {
+            uint8_t operation = state->active_band_index[index];
+            float *z1 = &state->band_z[operation].z1[channel];
+            float *z2 = &state->band_z[operation].z2[channel];
+            if (!isfinite(*z1) || fabsf(*z1) < 1e-15f) *z1 = 0.0f;
+            if (!isfinite(*z2) || fabsf(*z2) < 1e-15f) *z2 = 0.0f;
+        }
+    }
+}
+
+static inline float limit_output_sample(float x,
+                                        eq_dsp_output_limit_t output_limit,
+                                        int32_t *clip_counter) {
+    const float positive_limit = 32767.0f;
+    const float negative_limit = 32768.0f;
+    const float knee = 32600.0f;
+    float sign = 1.0f;
+    float ax = x;
+    float limit = positive_limit;
+
+    if (!isfinite(x)) {
+        if (clip_counter) (*clip_counter)++;
+        return 0.0f;
+    }
+    if (x < 0.0f) {
+        sign = -1.0f;
+        ax = -x;
+        limit = negative_limit;
+    }
+    if (ax <= limit) {
+        return x;
+    }
+
+    if (clip_counter) (*clip_counter)++;
+    if (output_limit == EQ_DSP_OUTPUT_HARD_CLIP) {
+        return sign * limit;
+    }
+
+    {
+        float over = ax - knee;
+        float knee_range = limit - knee;
+        return sign * (knee + (knee_range * over) / (over + knee_range));
+    }
+}
+
+static inline int16_t limit_output_i16(float x,
+                                       eq_dsp_output_limit_t output_limit,
+                                       int32_t *clip_counter) {
+    x = limit_output_sample(x, output_limit, clip_counter);
+    x = (x >= 0.0f) ? (x + 0.5f) : (x - 0.5f);
+    if (x > 32767.0f) return 32767;
+    if (x < -32768.0f) return -32768;
+    return (int16_t)x;
 }
 
 static inline uint16_t abs_i16_peak(int16_t value) {
@@ -678,13 +737,12 @@ static inline float process_biquad_channel(const eq_biquad_t *c,
 
 #if !EQVITA_CORTEX_A9_NEON || defined(EQVITA_DSP_TEST_API)
 static void process_stereo_steady(eq_dsp_state_t *state, const int16_t *input, int16_t *output,
-                                  uint32_t frames, int32_t *clip_counter,
+                                  uint32_t frames, eq_dsp_output_limit_t output_limit,
+                                  int32_t *clip_counter,
                                   uint16_t *peak_l, uint16_t *peak_r) {
     const float preamp = state->preamp;
     uint16_t max_l = 0;
     uint16_t max_r = 0;
-
-    (void)clip_counter;
 
     for (uint32_t frame = 0; frame < frames; ++frame) {
         float left = (float)input[0];
@@ -717,8 +775,8 @@ static void process_stereo_steady(eq_dsp_state_t *state, const int16_t *input, i
         }
 
         {
-            int16_t out_l = hard_clip_i16(left);
-            int16_t out_r = hard_clip_i16(right);
+            int16_t out_l = limit_output_i16(left, output_limit, clip_counter);
+            int16_t out_r = limit_output_i16(right, output_limit, clip_counter);
             uint16_t abs_l = abs_i16_peak(out_l);
             uint16_t abs_r = abs_i16_peak(out_r);
 
@@ -738,14 +796,13 @@ static void process_stereo_steady(eq_dsp_state_t *state, const int16_t *input, i
 
 #if EQVITA_CORTEX_A9_NEON
 static void process_stereo_steady_neon(eq_dsp_state_t *state, const int16_t *input, int16_t *output,
-                                       uint32_t frames, int32_t *clip_counter,
+                                       uint32_t frames, eq_dsp_output_limit_t output_limit,
+                                       int32_t *clip_counter,
                                        uint16_t *peak_l, uint16_t *peak_r) {
     const float32x2_t lower = vdup_n_f32(-32768.0f);
     const float32x2_t upper = vdup_n_f32(32767.0f);
     const float32x2_t preamp = vdup_n_f32(state->preamp);
     float32x2_t peak = vdup_n_f32(0.0f);
-
-    (void)clip_counter;
 
 #define EQ_NEON_DF2T_STEP(SAMPLE) do { \
         float32x2_t eq_y = vmla_f32(z1, (SAMPLE), b0); \
@@ -760,9 +817,16 @@ static void process_stereo_steady_neon(eq_dsp_state_t *state, const int16_t *inp
         (SAMPLE) = vmla_lane_f32(eq_copy_output, column_r, eq_copy_input, 1); \
     } while (0)
 
-#define EQ_NEON_CLAMP_PAIR(SAMPLE) do { \
-        (SAMPLE) = vmax_f32((SAMPLE), lower); \
-        (SAMPLE) = vmin_f32((SAMPLE), upper); \
+#define EQ_NEON_LIMIT_PAIR(SAMPLE) do { \
+        uint32x2_t eq_over = vorr_u32(vcgt_f32((SAMPLE), upper), vclt_f32((SAMPLE), lower)); \
+        eq_over = vorr_u32(eq_over, vmvn_u32(vceq_f32((SAMPLE), (SAMPLE)))); \
+        if (vget_lane_u32(eq_over, 0) || vget_lane_u32(eq_over, 1)) { \
+            float eq_lanes[2]; \
+            vst1_f32(eq_lanes, (SAMPLE)); \
+            eq_lanes[0] = limit_output_sample(eq_lanes[0], output_limit, clip_counter); \
+            eq_lanes[1] = limit_output_sample(eq_lanes[1], output_limit, clip_counter); \
+            (SAMPLE) = vld1_f32(eq_lanes); \
+        } \
         peak = vmax_f32(peak, vabs_f32((SAMPLE))); \
     } while (0)
 
@@ -845,10 +909,10 @@ static void process_stereo_steady_neon(eq_dsp_state_t *state, const int16_t *inp
             int16x4_t packed0;
             int16x4_t packed1;
 
-            EQ_NEON_CLAMP_PAIR(x0);
-            EQ_NEON_CLAMP_PAIR(x1);
-            EQ_NEON_CLAMP_PAIR(x2);
-            EQ_NEON_CLAMP_PAIR(x3);
+            EQ_NEON_LIMIT_PAIR(x0);
+            EQ_NEON_LIMIT_PAIR(x1);
+            EQ_NEON_LIMIT_PAIR(x2);
+            EQ_NEON_LIMIT_PAIR(x3);
 
             EQ_VFP_ROUND_PAIR(x0, rounded0);
             EQ_VFP_ROUND_PAIR(x1, rounded1);
@@ -916,7 +980,7 @@ static void process_stereo_steady_neon(eq_dsp_state_t *state, const int16_t *inp
             int32x2_t rounded;
             int16x4_t packed;
 
-            EQ_NEON_CLAMP_PAIR(x);
+            EQ_NEON_LIMIT_PAIR(x);
             EQ_VFP_ROUND_PAIR(x, rounded);
             packed = vmovn_s32(vcombine_s32(rounded, rounded));
             vst1_lane_s16(output, packed, 0);
@@ -928,7 +992,7 @@ static void process_stereo_steady_neon(eq_dsp_state_t *state, const int16_t *inp
     }
 
 #undef EQ_VFP_ROUND_PAIR
-#undef EQ_NEON_CLAMP_PAIR
+#undef EQ_NEON_LIMIT_PAIR
 #undef EQ_NEON_COPY_STEP
 #undef EQ_NEON_DF2T_STEP
 
@@ -948,13 +1012,12 @@ static void process_stereo_steady_neon(eq_dsp_state_t *state, const int16_t *inp
 #endif
 
 static void process_generic_steady(eq_dsp_state_t *state, const int16_t *input, int16_t *output,
-                                   uint32_t frames, uint32_t channels, int32_t *clip_counter,
+                                   uint32_t frames, uint32_t channels,
+                                   eq_dsp_output_limit_t output_limit, int32_t *clip_counter,
                                    uint16_t *peak_l, uint16_t *peak_r) {
     const float preamp = state->preamp;
     uint16_t max_l = 0;
     uint16_t max_r = 0;
-
-    (void)clip_counter;
 
     for (uint32_t frame = 0; frame < frames; ++frame) {
         for (uint32_t ch = 0; ch < channels; ++ch) {
@@ -975,7 +1038,7 @@ static void process_generic_steady(eq_dsp_state_t *state, const int16_t *input, 
                 }
             }
 
-            int16_t out_val = hard_clip_i16(sample);
+            int16_t out_val = limit_output_i16(sample, output_limit, clip_counter);
             uint16_t abs_val = abs_i16_peak(out_val);
             output[idx] = out_val;
 
@@ -991,13 +1054,23 @@ static void process_generic_steady(eq_dsp_state_t *state, const int16_t *input, 
     if (peak_r) *peak_r = max_r;
 }
 
-void eq_dsp_apply_to(eq_dsp_state_t *state, const int16_t *input, int16_t *output, uint32_t frames, uint32_t channels, int32_t *clip_counter, uint16_t *peak_l, uint16_t *peak_r) {
+void eq_dsp_apply_to(eq_dsp_state_t *state, const int16_t *input, int16_t *output, uint32_t frames, uint32_t channels, eq_dsp_output_limit_t output_limit, int32_t *clip_counter, uint16_t *peak_l, uint16_t *peak_r) {
 #if EQVITA_CORTEX_A9_NEON
     uint32_t saved_fpscr;
     uint32_t processing_fpscr;
 #endif
 
     if (!state || !input || !output || channels < 1 || channels > EQ_DSP_MAX_CHANNELS) { return; }
+    if (output_limit != EQ_DSP_OUTPUT_HARD_CLIP) {
+        output_limit = EQ_DSP_OUTPUT_SOFT_LIMIT;
+    }
+
+    sanitize_preamp_state(state);
+    sanitize_smoothing_state(state);
+    if (sanitize_biquad_state(state)) {
+        rebuild_active_stereo_coefficients(state);
+    }
+    sanitize_delay_state(state, channels);
 
 #if EQVITA_CORTEX_A9_NEON
     /*
@@ -1015,18 +1088,18 @@ void eq_dsp_apply_to(eq_dsp_state_t *state, const int16_t *input, int16_t *outpu
 #if EQVITA_CORTEX_A9_NEON
 #if defined(EQVITA_DSP_TEST_API)
             if (g_neon_enabled_for_tests) {
-                process_stereo_steady_neon(state, input, output, frames, clip_counter, peak_l, peak_r);
+                process_stereo_steady_neon(state, input, output, frames, output_limit, clip_counter, peak_l, peak_r);
             } else {
-                process_stereo_steady(state, input, output, frames, clip_counter, peak_l, peak_r);
+                process_stereo_steady(state, input, output, frames, output_limit, clip_counter, peak_l, peak_r);
             }
 #else
-            process_stereo_steady_neon(state, input, output, frames, clip_counter, peak_l, peak_r);
+            process_stereo_steady_neon(state, input, output, frames, output_limit, clip_counter, peak_l, peak_r);
 #endif
 #else
-            process_stereo_steady(state, input, output, frames, clip_counter, peak_l, peak_r);
+            process_stereo_steady(state, input, output, frames, output_limit, clip_counter, peak_l, peak_r);
 #endif
         } else {
-            process_generic_steady(state, input, output, frames, channels, clip_counter, peak_l, peak_r);
+            process_generic_steady(state, input, output, frames, channels, output_limit, clip_counter, peak_l, peak_r);
         }
 
 #if EQVITA_CORTEX_A9_NEON
@@ -1097,7 +1170,7 @@ void eq_dsp_apply_to(eq_dsp_state_t *state, const int16_t *input, int16_t *outpu
 
         for (uint32_t ch = 0; ch < channels; ++ch) {
             int32_t idx = (i * channels) + ch;
-            int16_t out_val = hard_clip_i16(sample[ch]);
+            int16_t out_val = limit_output_i16(sample[ch], output_limit, clip_counter);
             uint16_t abs_val = abs_i16_peak(out_val);
             output[idx] = out_val;
             if (ch == 0) {
@@ -1142,8 +1215,8 @@ void eq_dsp_apply_to(eq_dsp_state_t *state, const int16_t *input, int16_t *outpu
     if (peak_r) *peak_r = max_r;
 }
 
-void eq_dsp_apply(eq_dsp_state_t *state, int16_t *pcm, uint32_t frames, uint32_t channels, int32_t *clip_counter, uint16_t *peak_l, uint16_t *peak_r) {
-    eq_dsp_apply_to(state, pcm, pcm, frames, channels, clip_counter, peak_l, peak_r);
+void eq_dsp_apply(eq_dsp_state_t *state, int16_t *pcm, uint32_t frames, uint32_t channels, eq_dsp_output_limit_t output_limit, int32_t *clip_counter, uint16_t *peak_l, uint16_t *peak_r) {
+    eq_dsp_apply_to(state, pcm, pcm, frames, channels, output_limit, clip_counter, peak_l, peak_r);
 }
 
 uint32_t eq_dsp_active_band_count(const eq_dsp_state_t *state) {

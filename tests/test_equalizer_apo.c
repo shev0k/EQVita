@@ -337,7 +337,8 @@ static void process_text(const char *text, int16_t *pcm, int frames, int channel
                                   control.parametric_filter_count,
                                   control.preamp_mdB,
                                   eq_control_hpf_enabled(&control));
-    eq_dsp_apply(&dsp, pcm, (uint32_t)frames, (uint32_t)channels, &clips, NULL, NULL);
+    eq_dsp_apply(&dsp, pcm, (uint32_t)frames, (uint32_t)channels,
+                 EQ_DSP_OUTPUT_HARD_CLIP, &clips, NULL, NULL);
 }
 
 static void test_copy_audio_results(void)
@@ -499,7 +500,7 @@ static void test_synthetic_configs_run_through_dsp_without_nonfinite_state(void)
                 pcm[frame * 2] = (int16_t)(((frame * 197 + block * 83) % 24000) - 12000);
                 pcm[frame * 2 + 1] = (int16_t)(((frame * 149 + block * 127) % 22000) - 11000);
             }
-            eq_dsp_apply(&dsp, pcm, 256, 2, &clips, NULL, NULL);
+            eq_dsp_apply(&dsp, pcm, 256, 2, EQ_DSP_OUTPUT_HARD_CLIP, &clips, NULL, NULL);
         }
 
         CHECK(isfinite(dsp.preamp));

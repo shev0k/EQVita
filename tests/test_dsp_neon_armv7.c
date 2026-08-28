@@ -99,7 +99,7 @@ static int close_float(float a, float b)
     } \
 } while (0)
 
-static void test_neon_matches_scalar_reference(void)
+static void check_neon_matches_scalar_reference(eq_dsp_output_limit_t output_limit)
 {
     enum { FRAMES = 257 };
     eq_dsp_state_t scalar;
@@ -107,8 +107,8 @@ static void test_neon_matches_scalar_reference(void)
     int16_t input[FRAMES * 2];
     int16_t scalar_output[FRAMES * 2];
     int16_t neon_output[FRAMES * 2];
-    int32_t scalar_clips = 17;
-    int32_t neon_clips = 17;
+    int32_t scalar_clips = 0;
+    int32_t neon_clips = 0;
     uint16_t scalar_peak_l = 0;
     uint16_t scalar_peak_r = 0;
     uint16_t neon_peak_l = 0;
@@ -116,18 +116,20 @@ static void test_neon_matches_scalar_reference(void)
     int max_difference = 0;
 
     make_ordered_profile(&scalar);
+    scalar.preamp = 2.0f;
+    scalar.target_preamp = 2.0f;
     neon = scalar;
     fill_input(input, FRAMES);
 
     eq_dsp_set_neon_enabled_for_tests(0);
-    eq_dsp_apply_to(&scalar, input, scalar_output, FRAMES, 2, &scalar_clips,
+    eq_dsp_apply_to(&scalar, input, scalar_output, FRAMES, 2, output_limit, &scalar_clips,
                     &scalar_peak_l, &scalar_peak_r);
     eq_dsp_set_neon_enabled_for_tests(1);
-    eq_dsp_apply_to(&neon, input, neon_output, FRAMES, 2, &neon_clips,
+    eq_dsp_apply_to(&neon, input, neon_output, FRAMES, 2, output_limit, &neon_clips,
                     &neon_peak_l, &neon_peak_r);
 
-    CHECK(scalar_clips == 17);
-    CHECK(neon_clips == 17);
+    CHECK(scalar_clips > 0);
+    CHECK(neon_clips == scalar_clips);
     for (int sample = 0; sample < FRAMES * 2; ++sample) {
         int difference = scalar_output[sample] - neon_output[sample];
         if (difference < 0) difference = -difference;
@@ -151,6 +153,12 @@ static void test_neon_matches_scalar_reference(void)
                               neon.band_z[operation].z2[channel]);
         }
     }
+}
+
+static void test_neon_matches_scalar_reference_for_both_limit_modes(void)
+{
+    check_neon_matches_scalar_reference(EQ_DSP_OUTPUT_SOFT_LIMIT);
+    check_neon_matches_scalar_reference(EQ_DSP_OUTPUT_HARD_CLIP);
 }
 
 static void test_vcvtr_rounds_to_nearest_even_and_restores_fpscr(void)
@@ -177,7 +185,7 @@ static void test_vcvtr_rounds_to_nearest_even_and_restores_fpscr(void)
     __asm__ volatile("vmrs %0, fpscr" : "=r"(original_fpscr));
     caller_fpscr = (original_fpscr & ~(3u << 22)) | (3u << 22);
     __asm__ volatile("vmsr fpscr, %0" : : "r"(caller_fpscr) : "memory");
-    eq_dsp_apply(&state, pcm, 8u, 2u, NULL, NULL, NULL);
+    eq_dsp_apply(&state, pcm, 8u, 2u, EQ_DSP_OUTPUT_SOFT_LIMIT, NULL, NULL, NULL);
     __asm__ volatile("vmrs %0, fpscr" : "=r"(restored_fpscr));
     __asm__ volatile("vmsr fpscr, %0" : : "r"(original_fpscr) : "memory");
 
@@ -187,7 +195,7 @@ static void test_vcvtr_rounds_to_nearest_even_and_restores_fpscr(void)
     }
 }
 
-static void test_neon_hard_saturation_does_not_log_clips(void)
+static void test_neon_hard_saturation_counts_clips(void)
 {
     eq_dsp_state_t state;
     int16_t pcm[8 * 2];
@@ -205,9 +213,9 @@ static void test_neon_hard_saturation_does_not_log_clips(void)
     }
 
     eq_dsp_set_neon_enabled_for_tests(1);
-    eq_dsp_apply(&state, pcm, 8u, 2u, &clips, &peak_l, &peak_r);
+    eq_dsp_apply(&state, pcm, 8u, 2u, EQ_DSP_OUTPUT_HARD_CLIP, &clips, &peak_l, &peak_r);
 
-    CHECK(clips == 0);
+    CHECK(clips == 16);
     CHECK(peak_l == 32767u);
     CHECK(peak_r == 32768u);
     for (int frame = 0; frame < 8; ++frame) {
@@ -234,7 +242,7 @@ static void test_vita_processing_flushes_subnormals_and_restores_fpscr(void)
     __asm__ volatile("vmrs %0, fpscr" : "=r"(original_fpscr));
     caller_fpscr = (original_fpscr & ~(7u << 22)) | (1u << 22);
     __asm__ volatile("vmsr fpscr, %0" : : "r"(caller_fpscr) : "memory");
-    eq_dsp_apply(&state, &pcm, 1u, 1u, NULL, NULL, NULL);
+    eq_dsp_apply(&state, &pcm, 1u, 1u, EQ_DSP_OUTPUT_SOFT_LIMIT, NULL, NULL, NULL);
     __asm__ volatile("vmrs %0, fpscr" : "=r"(restored_fpscr));
     __asm__ volatile("vmsr fpscr, %0" : : "r"(original_fpscr) : "memory");
 
@@ -260,9 +268,10 @@ static void test_neon_split_blocks_match_one_block(void)
     memcpy(split_pcm, single_pcm, sizeof(single_pcm));
     eq_dsp_set_neon_enabled_for_tests(1);
 
-    eq_dsp_apply(&single, single_pcm, FRAMES, 2u, NULL, NULL, NULL);
+    eq_dsp_apply(&single, single_pcm, FRAMES, 2u, EQ_DSP_OUTPUT_SOFT_LIMIT, NULL, NULL, NULL);
     for (unsigned chunk = 0; chunk < sizeof(chunks) / sizeof(chunks[0]); ++chunk) {
-        eq_dsp_apply(&split, split_pcm + offset * 2u, chunks[chunk], 2u, NULL, NULL, NULL);
+        eq_dsp_apply(&split, split_pcm + offset * 2u, chunks[chunk], 2u,
+                     EQ_DSP_OUTPUT_SOFT_LIMIT, NULL, NULL, NULL);
         offset += chunks[chunk];
     }
 
@@ -274,9 +283,9 @@ static void test_neon_split_blocks_match_one_block(void)
 
 int main(void)
 {
-    test_neon_matches_scalar_reference();
+    test_neon_matches_scalar_reference_for_both_limit_modes();
     test_vcvtr_rounds_to_nearest_even_and_restores_fpscr();
-    test_neon_hard_saturation_does_not_log_clips();
+    test_neon_hard_saturation_counts_clips();
     test_vita_processing_flushes_subnormals_and_restores_fpscr();
     test_neon_split_blocks_match_one_block();
 

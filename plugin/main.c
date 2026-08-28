@@ -870,7 +870,17 @@ static int sceAudioOutOutput_hook(int port, const void *buf) {
 #endif
 
                         stage_start_us = ksceKernelGetSystemTimeLow();
-                        eq_dsp_apply_to(&processing_port->dsp, processing_port->original, processing_port->scratch, frames, channels, &clip_count, &peak_l, &peak_r);
+                        eq_dsp_apply_to(&processing_port->dsp,
+                                        processing_port->original,
+                                        processing_port->scratch,
+                                        frames,
+                                        channels,
+                                        eq_control_get_headroom_mode(&control) == EQ_HEADROOM_EXACT
+                                            ? EQ_DSP_OUTPUT_HARD_CLIP
+                                            : EQ_DSP_OUTPUT_SOFT_LIMIT,
+                                        &clip_count,
+                                        &peak_l,
+                                        &peak_r);
                         stage_dsp_us = ksceKernelGetSystemTimeLow() - stage_start_us;
 
                         smoothing = (processing_port->dsp.smooth_remaining > 0);
