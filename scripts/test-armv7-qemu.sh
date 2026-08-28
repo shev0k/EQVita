@@ -10,8 +10,14 @@ equalizer_binary="$arm_build_dir/test_equalizer_apo_armv7"
 dsp_binary="$arm_build_dir/test_dsp_armv7"
 neon_binary="$arm_build_dir/test_dsp_neon_armv7"
 
-command -v "$arm_cc" >/dev/null
-command -v "$qemu_arm" >/dev/null
+if ! command -v "$arm_cc" >/dev/null 2>&1; then
+  echo "error: ARM compiler '$arm_cc' was not found; install gcc-arm-linux-gnueabihf" >&2
+  exit 1
+fi
+if ! command -v "$qemu_arm" >/dev/null 2>&1; then
+  echo "error: QEMU runner '$qemu_arm' was not found; install qemu-user" >&2
+  exit 1
+fi
 mkdir -p "$arm_build_dir"
 
 common_flags=(
