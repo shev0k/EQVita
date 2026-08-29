@@ -1,0 +1,4 @@
+# Synthetic parent keeps the right-channel selection across an include.
+Channel: R
+Include: channel_scope_child.txt
+Filter: ON PK Fc 2000 Hz Gain -2 dB Q 1

@@ -16,6 +16,12 @@ For devs: do not mix app/plugin versions, and do not claim audio stability from 
   EQVITA_BUILD_TYPE=Debug bash scripts/test-host-wsl.sh
   ```
 
+- If Equalizer APO or DSP code changed, run the ARMv7 Cortex-A9 fixture test:
+
+  ```bash
+  bash scripts/test-armv7-qemu.sh
+  ```
+
 - Run release hygiene:
 
   ```powershell

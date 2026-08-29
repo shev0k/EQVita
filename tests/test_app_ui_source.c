@@ -379,8 +379,6 @@ static void test_music_browser_copies_selected_path_before_opening(void)
     snprintf(path, sizeof(path), "%s/app/main.c", EQVITA_SOURCE_DIR);
     source = read_file(path);
 
-    ASSERT_TRUE(strstr(source, "browser_async_start(NULL, 1)") != NULL);
-
     browser_case = strstr(source, "static void activate_current(void)");
     ASSERT_TRUE(browser_case != NULL);
     browser_case = strstr(browser_case, "case SCREEN_MUSIC_BROWSER:");
@@ -392,8 +390,108 @@ static void test_music_browser_copies_selected_path_before_opening(void)
     ASSERT_TRUE(range_contains(browser_case, browser_case_end, "snprintf(next_path, sizeof(next_path), \"%s\", entry->path)"));
     ASSERT_TRUE(range_contains(browser_case, browser_case_end, "media_player_play_selected(next_path)"));
     ASSERT_TRUE(range_contains(browser_case, browser_case_end, "open_music_browser_path(next_path)"));
+    ASSERT_TRUE(range_contains(browser_case, browser_case_end, "import_equalizer_apo_file(next_path)"));
+    ASSERT_TRUE(range_contains(browser_case, browser_case_end, "open_apo_browser_path(next_path)"));
 
     free(source);
+}
+
+static void test_peq_library_and_route_ui_are_wired(void)
+{
+    char path[512];
+    char *main_source;
+    char *persistence_header;
+
+    snprintf(path, sizeof(path), "%s/app/main.c", EQVITA_SOURCE_DIR);
+    main_source = read_file(path);
+    snprintf(path, sizeof(path), "%s/app/persistence.h", EQVITA_SOURCE_DIR);
+    persistence_header = read_file(path);
+    ASSERT_TRUE(strstr(persistence_header,
+                       "#define EQVITA_PEQ_DIR EQVITA_DATA_DIR \"/\" EQVITA_PEQ_DIR_NAME") != NULL);
+    ASSERT_TRUE(strstr(main_source, "eqvita_ensure_peq_dir(EQVITA_DATA_DIR)") != NULL);
+    ASSERT_TRUE(strstr(main_source, "eqvita_seed_peq_file(EQVITA_DATA_DIR") != NULL);
+    ASSERT_TRUE(strstr(main_source,
+                       "eqvita_media_browser_read_dir_filtered_at_root") != NULL);
+    ASSERT_TRUE(strstr(main_source, "Put .txt files in ur0:data/eqvita/peq") != NULL);
+    ASSERT_TRUE(strstr(main_source, "Choose PEQ file") != NULL);
+    ASSERT_TRUE(strstr(main_source, "Inspect / edit PEQ") != NULL);
+    ASSERT_TRUE(strstr(main_source, "Clear this output") != NULL);
+    ASSERT_TRUE(strstr(main_source, "EqSetRouteProfiles(&next_profiles)") != NULL);
+    ASSERT_TRUE(strstr(main_source, "Unassigned outputs are bypassed") != NULL);
+    ASSERT_TRUE(strstr(main_source, "g_eq_return_screen = SCREEN_OUTPUT_PEQ") != NULL);
+    ASSERT_TRUE(strstr(main_source, "return_screen = g_output_peq_return_screen") != NULL);
+
+    free(main_source);
+    free(persistence_header);
+}
+
+static void test_home_exposes_parametric_eq_below_advanced_eq(void)
+{
+    char path[512];
+    char *source;
+    char *home_rows;
+    char *home_rows_end;
+    char *activation;
+    char *activation_end;
+
+    snprintf(path, sizeof(path), "%s/app/main.c", EQVITA_SOURCE_DIR);
+    source = read_file(path);
+
+    ASSERT_TRUE(strstr(source, "#define HOME_ROW_ADVANCED 2") != NULL);
+    ASSERT_TRUE(strstr(source, "#define HOME_ROW_PARAMETRIC 3") != NULL);
+    ASSERT_TRUE(strstr(source, "#define HOME_ROW_COUNT 10") != NULL);
+    ASSERT_TRUE(strstr(source, "case HOME_ROW_PARAMETRIC: return SCREEN_OUTPUT_PEQ") != NULL);
+
+    home_rows = strstr(source, "case SCREEN_HOME: {");
+    ASSERT_TRUE(home_rows != NULL);
+    home_rows_end = strstr(home_rows + 1, "case SCREEN_STATUS:");
+    ASSERT_TRUE(home_rows_end != NULL);
+    ASSERT_TRUE(range_contains(home_rows, home_rows_end,
+                               "\"Advanced EQ\", \"Parametric EQ\", \"Presets\""));
+    ASSERT_TRUE(range_contains(home_rows, home_rows_end,
+                               "Import APO .txt profiles for each output"));
+
+    activation = strstr(source, "static void activate_current(void)");
+    ASSERT_TRUE(activation != NULL);
+    activation_end = strstr(activation + 1, "case SCREEN_PRESETS:");
+    ASSERT_TRUE(activation_end != NULL);
+    ASSERT_TRUE(range_contains(activation, activation_end,
+                               "open_output_peq_screen(SCREEN_HOME)"));
+    ASSERT_TRUE(strstr(source, "open_output_peq_screen(SCREEN_PRESETS)") != NULL);
+
+    free(source);
+}
+
+static void test_route_detection_uses_avconfig_and_weak_plugin_import(void)
+{
+    char path[512];
+    char *main_source;
+    char *cmake_source;
+    char *route_start;
+    char *route_end;
+
+    snprintf(path, sizeof(path), "%s/app/main.c", EQVITA_SOURCE_DIR);
+    main_source = read_file(path);
+    snprintf(path, sizeof(path), "%s/app/CMakeLists.txt", EQVITA_SOURCE_DIR);
+    cmake_source = read_file(path);
+
+    ASSERT_TRUE(strstr(main_source, "sceAVConfigGetConnectedAudioDevice") != NULL);
+    ASSERT_TRUE(strstr(main_source, "sceAVConfigGetVolCtrlEnable") != NULL);
+    ASSERT_TRUE(strstr(cmake_source, "SceAVConfig_stub") != NULL);
+    ASSERT_TRUE(strstr(cmake_source, "EQSpeaker_stub_weak") != NULL);
+    ASSERT_TRUE(strstr(cmake_source, "\n  EQSpeaker_stub\n") == NULL);
+
+    route_start = strstr(main_source, "static eq_route_t detect_route_user(void)");
+    ASSERT_TRUE(route_start != NULL);
+    route_end = strstr(route_start + 1, "static uint32_t audio_budget_us");
+    ASSERT_TRUE(route_end != NULL);
+    ASSERT_TRUE(range_contains(route_start, route_end, "SCE_AVCONFIG_AUDIO_DEVICE_BT_AUDIO_OUT"));
+    ASSERT_TRUE(range_contains(route_start, route_end, "SCE_AVCONFIG_AUDIO_DEVICE_AUDIO_OUT"));
+    ASSERT_TRUE(range_contains(route_start, route_end, "SCE_CTRL_HEADPHONE"));
+    ASSERT_TRUE(range_contains(route_start, route_end, "return EQ_ROUTE_UNKNOWN"));
+
+    free(main_source);
+    free(cmake_source);
 }
 
 static void test_music_browser_cancel_goes_to_parent_before_player(void)
@@ -454,7 +552,7 @@ static void test_media_browser_uses_heap_staging_for_large_listings(void)
     ASSERT_TRUE(worker_end != NULL);
     ASSERT_TRUE(!range_contains(worker, worker_end, "eqvita_media_listing_t listing;"));
     ASSERT_TRUE(range_contains(worker, worker_end, "eqvita_media_browser_read_roots(&job->listing)"));
-    ASSERT_TRUE(range_contains(worker, worker_end, "eqvita_media_browser_read_dir(&job->listing"));
+    ASSERT_TRUE(range_contains(worker, worker_end, "eqvita_media_browser_read_dir_filtered(&job->listing"));
 
     free(source);
     free(main_source);
@@ -562,7 +660,8 @@ static void test_music_browser_loads_async_without_auto_pausing_preview(void)
     ASSERT_TRUE(open_roots != NULL);
     open_roots_end = strstr(open_roots + 1, "static void ");
     ASSERT_TRUE(open_roots_end != NULL);
-    ASSERT_TRUE(range_contains(open_roots, open_roots_end, "browser_async_start(NULL, 1)"));
+    ASSERT_TRUE(range_contains(open_roots, open_roots_end,
+                               "browser_async_start(NULL, 1, EQVITA_MEDIA_FILTER_AUDIO, NULL)"));
     ASSERT_TRUE(!range_contains(open_roots, open_roots_end, "eqvita_media_browser_read_roots(&g_media_listing)"));
 
     open_path = strstr(source, "static void open_music_browser_path(const char *path)");
@@ -571,7 +670,8 @@ static void test_music_browser_loads_async_without_auto_pausing_preview(void)
     ASSERT_TRUE(open_path != NULL);
     open_path_end = strstr(open_path + 1, "static void ");
     ASSERT_TRUE(open_path_end != NULL);
-    ASSERT_TRUE(range_contains(open_path, open_path_end, "browser_async_start(path, 0)"));
+    ASSERT_TRUE(range_contains(open_path, open_path_end,
+                               "browser_async_start(path, 0, EQVITA_MEDIA_FILTER_AUDIO, NULL)"));
     ASSERT_TRUE(!range_contains(open_path, open_path_end, "eqvita_media_browser_read_dir(&g_media_listing"));
 
     loop = strstr(source, "while (1) {");
@@ -627,6 +727,9 @@ int main(void)
     test_music_preview_uses_custom_player_surfaces();
     test_music_preview_keeps_actions_not_metadata_rows();
     test_music_browser_copies_selected_path_before_opening();
+    test_peq_library_and_route_ui_are_wired();
+    test_home_exposes_parametric_eq_below_advanced_eq();
+    test_route_detection_uses_avconfig_and_weak_plugin_import();
     test_music_browser_cancel_goes_to_parent_before_player();
     test_media_browser_uses_heap_staging_for_large_listings();
     test_music_preview_reduces_main_loop_polling_pressure();

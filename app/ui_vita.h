@@ -80,6 +80,9 @@ typedef struct eq_ui_music_browser_entry
 typedef struct eq_ui_music_browser_model
 {
     const char *path;
+    const char *title;
+    const char *instruction;
+    const char *empty_message;
     int selected_row;
     const eq_ui_music_browser_entry_t *entries;
     int entry_count;

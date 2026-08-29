@@ -931,8 +931,10 @@ void eq_ui_draw_music_browser_deck(const eq_ui_music_browser_model_t *model)
 
     draw_panel(52.0f, 74.0f, 292.0f, 406.0f, mix_color(t->row, t->bg_mid, 1, 5));
     draw_icon_cell(198.0f, 178.0f, PLAYER_ICON_FOLDER, ICON_VARIANT_NORMAL, 1.75f, C(255, 255, 255, 255));
-    draw_text_fit(78.0f, 304.0f, TEXT_SIZE, t->text, "Choose music", 238);
-    draw_text_fit(78.0f, 333.0f, TEXT_SIZE, t->subtext, "Open folders or play a song", 238);
+    draw_text_fit(78.0f, 304.0f, TEXT_SIZE, t->text,
+                  model->title ? model->title : "Choose music", 238);
+    draw_text_fit(78.0f, 333.0f, TEXT_SIZE, t->subtext,
+                  model->instruction ? model->instruction : "Open folders or play a song", 238);
     draw_text_fit(78.0f, 402.0f, TEXT_SIZE, t->subtext, "Current folder", 238);
     draw_text_fit(78.0f, 431.0f, TEXT_SIZE, t->text,
                   model->path && model->path[0] ? model->path : "Storage roots",
@@ -945,7 +947,8 @@ void eq_ui_draw_music_browser_deck(const eq_ui_music_browser_model_t *model)
 
     if (model->entry_count <= 0) {
         draw_panel(370.0f, 144.0f, 538.0f, 92.0f, mix_color(t->row, t->bg_bottom, 1, 3));
-        draw_text_fit(394.0f, 181.0f, TEXT_SIZE, t->text, "No music found here", 480);
+        draw_text_fit(394.0f, 181.0f, TEXT_SIZE, t->text,
+                      model->empty_message ? model->empty_message : "No music found here", 480);
         draw_text_fit(394.0f, 211.0f, TEXT_SIZE, t->subtext, "Try another folder or storage device", 480);
         return;
     }
@@ -1079,6 +1082,9 @@ void eq_ui_draw_slider(int visible_index,
     int fill = (amount_mdB * (bar_w / 2)) / 12000;
     unsigned int bar_color = selected ? t->selected_text : t->text;
     unsigned int fill_color = selected ? t->selected_icon_bg : color_alpha(t->accent, 220);
+
+    if (fill > bar_w / 2) fill = bar_w / 2;
+    if (fill < -(bar_w / 2)) fill = -(bar_w / 2);
 
     eq_ui_draw_row(visible_index, row_index, selected, icon, label, description, value, kind, bounds);
     vita2d_draw_rectangle(bar_x, bar_y, bar_w, 4, selected ? color_alpha(t->selected_text, 72) : color_alpha(t->text, 58));

@@ -66,7 +66,7 @@ static void test_left_channel_filter_state_does_not_bleed_into_right(void) {
         pcm[(i * 2) + 1] = 0;
     }
 
-    eq_dsp_apply(&dsp, pcm, 1024, 2, &clips, &peak_l, &peak_r);
+    eq_dsp_apply(&dsp, pcm, 1024, 2, EQ_DSP_OUTPUT_SOFT_LIMIT, &clips, &peak_l, &peak_r);
 
     for (int i = 0; i < 1024; ++i) {
         if (pcm[(i * 2) + 1] != 0) {
@@ -91,13 +91,13 @@ static void test_negative_full_scale_peak_is_reported(void) {
     dsp.target_preamp = 1.0f;
     dsp.smooth_remaining = 0;
 
-    eq_dsp_apply(&dsp, pcm, 2, 2, &clips, &peak_l, &peak_r);
+    eq_dsp_apply(&dsp, pcm, 2, 2, EQ_DSP_OUTPUT_SOFT_LIMIT, &clips, &peak_l, &peak_r);
 
     ASSERT_EQ_I32(peak_l, 32768);
     ASSERT_EQ_I32(peak_r, 32768);
 }
 
-static void test_overflow_counts_before_limiter(void) {
+static void test_overload_soft_limits_and_counts_clips(void) {
     eq_dsp_state_t dsp;
     int16_t pcm[2] = {32767, -32768};
     int32_t clips = 0;
@@ -109,13 +109,13 @@ static void test_overflow_counts_before_limiter(void) {
     dsp.target_preamp = 2.0f;
     dsp.smooth_remaining = 0;
 
-    eq_dsp_apply(&dsp, pcm, 1, 2, &clips, &peak_l, &peak_r);
+    eq_dsp_apply(&dsp, pcm, 1, 2, EQ_DSP_OUTPUT_SOFT_LIMIT, &clips, &peak_l, &peak_r);
 
-    ASSERT_TRUE(clips >= 2);
+    ASSERT_EQ_I32(clips, 2);
+    ASSERT_TRUE(pcm[0] >= 32600);
     ASSERT_TRUE(pcm[0] < 32767);
-    ASSERT_TRUE(pcm[0] > 30000);
+    ASSERT_TRUE(pcm[1] <= -32600);
     ASSERT_TRUE(pcm[1] > -32768);
-    ASSERT_TRUE(pcm[1] < -30000);
 }
 
 static void test_smoothing_reaches_target(void) {
@@ -129,7 +129,7 @@ static void test_smoothing_reaches_target(void) {
     memset(pcm, 0, sizeof(pcm));
     eq_dsp_init(&dsp, 48000);
     eq_dsp_set_targets(&dsp, 48000, bands, 0, 0);
-    eq_dsp_apply(&dsp, pcm, EQ_SMOOTH_SAMPLES, 1, &clips, &peak_l, &peak_r);
+    eq_dsp_apply(&dsp, pcm, EQ_SMOOTH_SAMPLES, 1, EQ_DSP_OUTPUT_SOFT_LIMIT, &clips, &peak_l, &peak_r);
 
     ASSERT_EQ_I32(dsp.smooth_remaining, 0);
 }
@@ -146,12 +146,12 @@ static void test_flat_eq_does_not_keep_active_band_filters(void) {
 
     bands[4] = 6000;
     eq_dsp_set_targets(&dsp, 48000, bands, 0, 0);
-    eq_dsp_apply(&dsp, pcm, EQ_SMOOTH_SAMPLES, 1, &clips, NULL, NULL);
+    eq_dsp_apply(&dsp, pcm, EQ_SMOOTH_SAMPLES, 1, EQ_DSP_OUTPUT_SOFT_LIMIT, &clips, NULL, NULL);
     ASSERT_EQ_I32(eq_dsp_active_band_count(&dsp), 1);
 
     bands[4] = 0;
     eq_dsp_set_targets(&dsp, 48000, bands, 0, 0);
-    eq_dsp_apply(&dsp, pcm, EQ_SMOOTH_SAMPLES, 1, &clips, NULL, NULL);
+    eq_dsp_apply(&dsp, pcm, EQ_SMOOTH_SAMPLES, 1, EQ_DSP_OUTPUT_SOFT_LIMIT, &clips, NULL, NULL);
     ASSERT_EQ_I32(eq_dsp_active_band_count(&dsp), 0);
 }
 
@@ -169,7 +169,7 @@ static void test_reapplying_same_targets_does_not_restart_smoothing(void) {
 
     eq_dsp_set_targets(&dsp, 48000, bands, 0, 0);
     ASSERT_TRUE(dsp.smooth_remaining > 0);
-    eq_dsp_apply(&dsp, pcm, EQ_SMOOTH_SAMPLES, 1, &clips, NULL, NULL);
+    eq_dsp_apply(&dsp, pcm, EQ_SMOOTH_SAMPLES, 1, EQ_DSP_OUTPUT_SOFT_LIMIT, &clips, NULL, NULL);
     ASSERT_EQ_I32(dsp.smooth_remaining, 0);
 
     eq_dsp_set_targets(&dsp, 48000, bands, 0, 0);
@@ -190,9 +190,9 @@ static void test_first_non_default_targets_snap_without_smoothing(void) {
 
     target_preamp = dsp.target_preamp;
     ASSERT_EQ_I32(dsp.smooth_remaining, 0);
-    ASSERT_EQ_I32(dsp.active_band_enabled[0], 1);
-    ASSERT_EQ_I32(dsp.active_band_enabled[1], 1);
-    ASSERT_EQ_I32(dsp.active_band_enabled[4], 1);
+    ASSERT_EQ_I32(dsp.active_band_enabled[0], EQ_CHANNEL_STEREO_MASK);
+    ASSERT_EQ_I32(dsp.active_band_enabled[1], EQ_CHANNEL_STEREO_MASK);
+    ASSERT_EQ_I32(dsp.active_band_enabled[4], EQ_CHANNEL_STEREO_MASK);
     ASSERT_TRUE(fabsf(dsp.preamp - target_preamp) < 0.000001f);
 
     bands[1] = 2000;
@@ -233,8 +233,8 @@ static void test_out_of_place_apply_matches_in_place_and_preserves_input(void) {
     eq_dsp_set_targets(&in_place_dsp, 48000, bands, -6000, 1);
     out_place_dsp = in_place_dsp;
 
-    eq_dsp_apply(&in_place_dsp, in_place_pcm, 128, 2, &in_place_clips, &in_peak_l, &in_peak_r);
-    eq_dsp_apply_to(&out_place_dsp, input, out_place_pcm, 128, 2, &out_place_clips, &out_peak_l, &out_peak_r);
+    eq_dsp_apply(&in_place_dsp, in_place_pcm, 128, 2, EQ_DSP_OUTPUT_SOFT_LIMIT, &in_place_clips, &in_peak_l, &in_peak_r);
+    eq_dsp_apply_to(&out_place_dsp, input, out_place_pcm, 128, 2, EQ_DSP_OUTPUT_SOFT_LIMIT, &out_place_clips, &out_peak_l, &out_peak_r);
 
     ASSERT_EQ_I32(out_place_clips, in_place_clips);
     ASSERT_EQ_I32(out_peak_l, in_peak_l);
@@ -269,7 +269,7 @@ static void test_high_gain_bursts_stay_bounded_over_many_blocks(void) {
             pcm[(frame * 2) + 1] = burst ? -24000 : 24000;
         }
 
-        eq_dsp_apply(&dsp, pcm, 256, 2, &clips, &peak_l, &peak_r);
+        eq_dsp_apply(&dsp, pcm, 256, 2, EQ_DSP_OUTPUT_SOFT_LIMIT, &clips, &peak_l, &peak_r);
 
         ASSERT_TRUE(isfinite(dsp.preamp));
         ASSERT_TRUE(isfinite(dsp.target_preamp));
@@ -282,7 +282,7 @@ static void test_high_gain_bursts_stay_bounded_over_many_blocks(void) {
     }
 }
 
-static void test_limiter_is_monotonic_for_positive_full_scale_ramp(void) {
+static void test_soft_limit_is_monotonic_for_positive_full_scale_ramp(void) {
     eq_dsp_state_t dsp;
     int16_t pcm[16];
     int32_t clips = 0;
@@ -296,7 +296,7 @@ static void test_limiter_is_monotonic_for_positive_full_scale_ramp(void) {
         pcm[i] = (int16_t)(24000 + (i * 500));
     }
 
-    eq_dsp_apply(&dsp, pcm, 16, 1, &clips, NULL, NULL);
+    eq_dsp_apply(&dsp, pcm, 16, 1, EQ_DSP_OUTPUT_SOFT_LIMIT, &clips, NULL, NULL);
 
     ASSERT_TRUE(clips > 0);
     for (int i = 1; i < 16; ++i) {
@@ -305,7 +305,7 @@ static void test_limiter_is_monotonic_for_positive_full_scale_ramp(void) {
     }
 }
 
-static void test_limiter_keeps_sustained_overload_near_soft_knee(void) {
+static void test_soft_limit_bounds_sustained_overload_and_counts_clips(void) {
     eq_dsp_state_t dsp;
     int16_t pcm[64 * 2];
     int32_t clips = 0;
@@ -322,18 +322,16 @@ static void test_limiter_keeps_sustained_overload_near_soft_knee(void) {
         pcm[(i * 2) + 1] = -32768;
     }
 
-    eq_dsp_apply(&dsp, pcm, 64, 2, &clips, &peak_l, &peak_r);
+    eq_dsp_apply(&dsp, pcm, 64, 2, EQ_DSP_OUTPUT_SOFT_LIMIT, &clips, &peak_l, &peak_r);
 
-    ASSERT_TRUE(clips >= 128);
-    ASSERT_TRUE(peak_l >= 32700u);
-    ASSERT_TRUE(peak_l <= 32767u);
-    ASSERT_TRUE(peak_r >= 32700u);
-    ASSERT_TRUE(peak_r <= 32768u);
+    ASSERT_EQ_I32(clips, 128);
+    ASSERT_TRUE(peak_l < 32767u);
+    ASSERT_TRUE(peak_r < 32768u);
     for (int i = 0; i < 64; ++i) {
-        ASSERT_TRUE(pcm[i * 2] >= 32700);
-        ASSERT_TRUE(pcm[i * 2] <= 32767);
-        ASSERT_TRUE(pcm[(i * 2) + 1] <= -32700);
-        ASSERT_TRUE(pcm[(i * 2) + 1] >= -32768);
+        ASSERT_TRUE(pcm[i * 2] >= 32600);
+        ASSERT_TRUE(pcm[i * 2] < 32767);
+        ASSERT_TRUE(pcm[(i * 2) + 1] <= -32600);
+        ASSERT_TRUE(pcm[(i * 2) + 1] > -32768);
     }
 }
 
@@ -361,182 +359,115 @@ static void test_extreme_target_values_are_clamped_before_coefficients(void) {
         ASSERT_FINITE_FLOAT(dsp.target[i].a2);
     }
 
-    eq_dsp_apply(&dsp, pcm, 64, 2, &clips, NULL, NULL);
+    eq_dsp_apply(&dsp, pcm, 64, 2, EQ_DSP_OUTPUT_SOFT_LIMIT, &clips, NULL, NULL);
     for (int i = 0; i < 64 * 2; ++i) {
         ASSERT_TRUE(pcm[i] >= -32768);
         ASSERT_TRUE(pcm[i] <= 32767);
     }
 }
 
-static void test_invalid_delay_state_is_flushed_before_processing(void) {
-    eq_dsp_state_t dsp;
-    int16_t pcm[4] = {1000, -1000, 500, -500};
-    int32_t clips = 0;
-
-    eq_dsp_init(&dsp, 48000);
-    dsp.hpf_enabled = 1;
-    dsp.active_band_enabled[3] = 1;
-    dsp.hpf_z[0].z1 = INFINITY;
-    dsp.band_z[1][3].z2 = -INFINITY;
-
-    eq_dsp_apply(&dsp, pcm, 2, 2, &clips, NULL, NULL);
-
-    (void)clips;
-    ASSERT_TRUE(pcm[0] >= -32768);
-    ASSERT_TRUE(pcm[0] <= 32767);
-    ASSERT_TRUE(pcm[1] >= -32768);
-    ASSERT_TRUE(pcm[1] <= 32767);
-    ASSERT_FINITE_FLOAT(dsp.hpf_z[0].z1);
-    ASSERT_FINITE_FLOAT(dsp.hpf_z[0].z2);
-    ASSERT_FINITE_FLOAT(dsp.band_z[1][3].z1);
-    ASSERT_FINITE_FLOAT(dsp.band_z[1][3].z2);
-}
-
-static void test_invalid_preamp_state_is_recovered(void) {
+static void test_invalid_internal_state_is_recovered_at_target_commit(void) {
     eq_dsp_state_t dsp;
     int32_t bands[EQ_BANDS] = {0};
-    int16_t pcm[4] = {1000, -1000, 500, -500};
-    int32_t clips = 0;
 
+    bands[4] = 6000;
     eq_dsp_init(&dsp, 48000);
-    dsp.preamp = NAN;
-    dsp.target_preamp = INFINITY;
-
     eq_dsp_set_targets(&dsp, 48000, bands, 0, 0);
-    ASSERT_FINITE_FLOAT(dsp.preamp);
-    ASSERT_FINITE_FLOAT(dsp.target_preamp);
+    ASSERT_EQ_I32(dsp.active_band_enabled[4], EQ_CHANNEL_STEREO_MASK);
 
     dsp.preamp = NAN;
     dsp.target_preamp = INFINITY;
-    dsp.smooth_remaining = 0;
-    eq_dsp_apply(&dsp, pcm, 2, 2, &clips, NULL, NULL);
-
-    ASSERT_FINITE_FLOAT(dsp.preamp);
-    ASSERT_FINITE_FLOAT(dsp.target_preamp);
-    for (int i = 0; i < 4; ++i) {
-        ASSERT_TRUE(pcm[i] >= -32768);
-        ASSERT_TRUE(pcm[i] <= 32767);
-    }
-}
-
-static void test_invalid_smoothing_state_is_clamped_before_processing(void) {
-    eq_dsp_state_t dsp;
-    int32_t bands[EQ_BANDS] = {0};
-    int16_t pcm[4] = {1000, 1000, 1000, 1000};
-    int32_t clips = 0;
-
-    eq_dsp_init(&dsp, 48000);
-    eq_dsp_set_targets(&dsp, 48000, bands, 0, 0);
     dsp.smooth_remaining = EQ_SMOOTH_SAMPLES * 4u;
-
-    eq_dsp_apply(&dsp, pcm, 4, 1, &clips, NULL, NULL);
-
-    ASSERT_TRUE(dsp.smooth_remaining < EQ_SMOOTH_SAMPLES);
-    ASSERT_TRUE(clips == 0);
-    for (int i = 0; i < 4; ++i) {
-        ASSERT_TRUE(pcm[i] >= 0);
-        ASSERT_TRUE(pcm[i] <= 1000);
-    }
-}
-
-static void test_invalid_active_band_coefficients_are_recovered(void) {
-    eq_dsp_state_t dsp;
-    int32_t bands[EQ_BANDS] = {0};
-    int16_t pcm[EQ_SMOOTH_SAMPLES];
-    int32_t clips = 0;
-
-    bands[4] = 6000;
-    for (int i = 0; i < EQ_SMOOTH_SAMPLES; ++i) {
-        pcm[i] = 1000;
-    }
-
-    eq_dsp_init(&dsp, 48000);
-    eq_dsp_set_targets(&dsp, 48000, bands, 0, 0);
-    eq_dsp_apply(&dsp, pcm, EQ_SMOOTH_SAMPLES, 1, &clips, NULL, NULL);
-    ASSERT_EQ_I32(dsp.smooth_remaining, 0);
-    ASSERT_EQ_I32(dsp.active_band_enabled[4], 1);
-
-    for (int i = 0; i < 8; ++i) {
-        pcm[i] = 1000;
-    }
-    dsp.active[4].b0 = NAN;
-    dsp.band_z[0][4].z1 = 55.0f;
-    dsp.band_z[0][4].z2 = -77.0f;
-    clips = 0;
-
-    eq_dsp_apply(&dsp, pcm, 0, 1, &clips, NULL, NULL);
-
-    ASSERT_FINITE_FLOAT(dsp.active[4].b0);
-    ASSERT_FINITE_FLOAT(dsp.active[4].b1);
-    ASSERT_FINITE_FLOAT(dsp.active[4].b2);
-    ASSERT_FINITE_FLOAT(dsp.active[4].a1);
-    ASSERT_FINITE_FLOAT(dsp.active[4].a2);
-    ASSERT_EQ_I32((int32_t)dsp.band_z[0][4].z1, 0);
-    ASSERT_EQ_I32((int32_t)dsp.band_z[0][4].z2, 0);
-
-    eq_dsp_apply(&dsp, pcm, 8, 1, &clips, NULL, NULL);
-
-    ASSERT_TRUE(clips == 0);
-    ASSERT_TRUE(pcm[0] > 0);
-}
-
-static void test_invalid_target_band_coefficients_are_disabled_before_smoothing(void) {
-    eq_dsp_state_t dsp;
-    int32_t flat[EQ_BANDS] = {0};
-    int32_t bands[EQ_BANDS] = {0};
-    int16_t pcm[8];
-    int32_t clips = 0;
-
-    bands[4] = 6000;
-    for (int i = 0; i < 8; ++i) {
-        pcm[i] = 1000;
-    }
-
-    eq_dsp_init(&dsp, 48000);
-    eq_dsp_set_targets(&dsp, 48000, flat, EQ_DEFAULT_PREAMP_MDB, 0);
-    eq_dsp_set_targets(&dsp, 48000, bands, 0, 0);
-    ASSERT_TRUE(dsp.smooth_remaining > 0);
-    ASSERT_EQ_I32(dsp.target_band_enabled[4], 1);
-
-    dsp.target[4].b0 = NAN;
-
-    eq_dsp_apply(&dsp, pcm, 8, 1, &clips, NULL, NULL);
-
-    ASSERT_FINITE_FLOAT(dsp.target[4].b0);
-    ASSERT_FINITE_FLOAT(dsp.target[4].b1);
-    ASSERT_FINITE_FLOAT(dsp.target[4].b2);
-    ASSERT_FINITE_FLOAT(dsp.target[4].a1);
-    ASSERT_FINITE_FLOAT(dsp.target[4].a2);
-    ASSERT_EQ_I32(dsp.target_band_enabled[4], 0);
-    ASSERT_TRUE(clips == 0);
-    ASSERT_TRUE(pcm[0] > 0);
-}
-
-static void test_invalid_hpf_coefficients_are_recomputed(void) {
-    eq_dsp_state_t dsp;
-    int16_t pcm[4] = {1000, 1000, 1000, 1000};
-    int32_t clips = 0;
-
-    eq_dsp_init(&dsp, 48000);
-    dsp.hpf_enabled = 1;
     dsp.hpf.b0 = INFINITY;
-    dsp.hpf_z[0].z1 = 44.0f;
-    dsp.hpf_z[0].z2 = -88.0f;
+    dsp.hpf_z.z1[0] = 44.0f;
+    dsp.hpf_z.z2[0] = -88.0f;
+    dsp.active[4].b0 = NAN;
+    dsp.band_z[4].z1[0] = 55.0f;
+    dsp.band_z[4].z2[0] = -77.0f;
+    dsp.target[5].b0 = NAN;
 
-    eq_dsp_apply(&dsp, pcm, 0, 1, &clips, NULL, NULL);
+    eq_dsp_set_targets(&dsp, 48000, bands, 0, 1);
 
+    ASSERT_FINITE_FLOAT(dsp.preamp);
+    ASSERT_FINITE_FLOAT(dsp.target_preamp);
+    ASSERT_TRUE(dsp.smooth_remaining <= EQ_SMOOTH_SAMPLES);
     ASSERT_FINITE_FLOAT(dsp.hpf.b0);
     ASSERT_FINITE_FLOAT(dsp.hpf.b1);
     ASSERT_FINITE_FLOAT(dsp.hpf.b2);
     ASSERT_FINITE_FLOAT(dsp.hpf.a1);
     ASSERT_FINITE_FLOAT(dsp.hpf.a2);
-    ASSERT_EQ_I32((int32_t)dsp.hpf_z[0].z1, 0);
-    ASSERT_EQ_I32((int32_t)dsp.hpf_z[0].z2, 0);
+    ASSERT_EQ_I32((int32_t)dsp.hpf_z.z1[0], 0);
+    ASSERT_EQ_I32((int32_t)dsp.hpf_z.z2[0], 0);
+    ASSERT_FINITE_FLOAT(dsp.active[4].b0);
+    ASSERT_FINITE_FLOAT(dsp.active[4].b1);
+    ASSERT_FINITE_FLOAT(dsp.active[4].b2);
+    ASSERT_FINITE_FLOAT(dsp.active[4].a1);
+    ASSERT_FINITE_FLOAT(dsp.active[4].a2);
+    ASSERT_EQ_I32((int32_t)dsp.band_z[4].z1[0], 0);
+    ASSERT_EQ_I32((int32_t)dsp.band_z[4].z2[0], 0);
+    ASSERT_FINITE_FLOAT(dsp.target[5].b0);
+    ASSERT_FINITE_FLOAT(dsp.target[5].b1);
+    ASSERT_FINITE_FLOAT(dsp.target[5].b2);
+    ASSERT_FINITE_FLOAT(dsp.target[5].a1);
+    ASSERT_FINITE_FLOAT(dsp.target[5].a2);
+    ASSERT_EQ_I32(dsp.target_band_enabled[5], 0);
+}
 
-    eq_dsp_apply(&dsp, pcm, 4, 1, &clips, NULL, NULL);
+static void test_invalid_delay_state_is_recovered_at_target_commit(void) {
+    eq_dsp_state_t dsp;
+    int32_t bands[EQ_BANDS] = {0};
 
-    ASSERT_TRUE(clips == 0);
-    ASSERT_TRUE(pcm[0] > 0);
+    bands[4] = 6000;
+    eq_dsp_init(&dsp, 48000);
+    eq_dsp_set_targets(&dsp, 48000, bands, 0, 1);
+
+    dsp.band_z[4].z1[0] = NAN;
+    dsp.band_z[4].z2[1] = INFINITY;
+    dsp.hpf_z.z1[0] = -INFINITY;
+    dsp.hpf_z.z2[1] = NAN;
+
+    eq_dsp_set_targets(&dsp, 48000, bands, 0, 1);
+
+    ASSERT_EQ_I32((int32_t)dsp.band_z[4].z1[0], 0);
+    ASSERT_EQ_I32((int32_t)dsp.band_z[4].z2[1], 0);
+    ASSERT_EQ_I32((int32_t)dsp.hpf_z.z1[0], 0);
+    ASSERT_EQ_I32((int32_t)dsp.hpf_z.z2[1], 0);
+}
+
+static void test_inactive_delay_state_is_recovered_before_band_is_enabled(void) {
+    eq_dsp_state_t dsp;
+    int32_t bands[EQ_BANDS] = {0};
+
+    eq_dsp_init(&dsp, 48000);
+    eq_dsp_set_targets(&dsp, 48000, bands, 0, 0);
+    ASSERT_EQ_I32(dsp.active_band_enabled[4], 0);
+
+    dsp.band_z[4].z1[0] = NAN;
+    dsp.band_z[4].z2[1] = INFINITY;
+    bands[4] = 6000;
+
+    eq_dsp_set_targets(&dsp, 48000, bands, 0, 0);
+
+    ASSERT_EQ_I32((int32_t)dsp.band_z[4].z1[0], 0);
+    ASSERT_EQ_I32((int32_t)dsp.band_z[4].z2[1], 0);
+    ASSERT_EQ_I32(dsp.target_band_enabled[4], EQ_CHANNEL_STEREO_MASK);
+}
+
+static void test_apo_exact_hard_saturates_and_counts_clips(void) {
+    eq_dsp_state_t dsp;
+    int16_t pcm[2] = {32767, -32768};
+    int32_t clips = 0;
+
+    eq_dsp_init(&dsp, 48000);
+    dsp.preamp = 2.0f;
+    dsp.target_preamp = 2.0f;
+    dsp.smooth_remaining = 0;
+
+    eq_dsp_apply(&dsp, pcm, 1, 2, EQ_DSP_OUTPUT_HARD_CLIP, &clips, NULL, NULL);
+
+    ASSERT_EQ_I32(clips, 2);
+    ASSERT_EQ_I32(pcm[0], 32767);
+    ASSERT_EQ_I32(pcm[1], -32768);
 }
 
 static void test_hpf_delay_state_resets_when_hpf_target_changes(void) {
@@ -546,22 +477,22 @@ static void test_hpf_delay_state_resets_when_hpf_target_changes(void) {
     eq_dsp_init(&dsp, 48000);
     eq_dsp_set_targets(&dsp, 48000, bands, 0, 1);
 
-    dsp.hpf_z[0].z1 = 123.0f;
-    dsp.hpf_z[0].z2 = -456.0f;
-    dsp.band_z[0][2].z1 = 789.0f;
+    dsp.hpf_z.z1[0] = 123.0f;
+    dsp.hpf_z.z2[0] = -456.0f;
+    dsp.band_z[2].z1[0] = 789.0f;
 
     eq_dsp_set_targets(&dsp, 48000, bands, 0, 0);
 
-    ASSERT_EQ_I32((int32_t)dsp.hpf_z[0].z1, 0);
-    ASSERT_EQ_I32((int32_t)dsp.hpf_z[0].z2, 0);
-    ASSERT_EQ_I32((int32_t)dsp.band_z[0][2].z1, 789);
+    ASSERT_EQ_I32((int32_t)dsp.hpf_z.z1[0], 0);
+    ASSERT_EQ_I32((int32_t)dsp.hpf_z.z2[0], 0);
+    ASSERT_EQ_I32((int32_t)dsp.band_z[2].z1[0], 789);
 
-    dsp.hpf_z[1].z1 = -321.0f;
-    dsp.hpf_z[1].z2 = 654.0f;
+    dsp.hpf_z.z1[1] = -321.0f;
+    dsp.hpf_z.z2[1] = 654.0f;
     eq_dsp_set_targets(&dsp, 48000, bands, 0, 1);
 
-    ASSERT_EQ_I32((int32_t)dsp.hpf_z[1].z1, 0);
-    ASSERT_EQ_I32((int32_t)dsp.hpf_z[1].z2, 0);
+    ASSERT_EQ_I32((int32_t)dsp.hpf_z.z1[1], 0);
+    ASSERT_EQ_I32((int32_t)dsp.hpf_z.z2[1], 0);
 }
 
 static void test_retargeting_mid_smoothing_starts_from_current_gain(void) {
@@ -578,7 +509,7 @@ static void test_retargeting_mid_smoothing_starts_from_current_gain(void) {
 
     eq_dsp_set_targets(&dsp, 48000, bands, EQ_DEFAULT_PREAMP_MDB, 0);
     eq_dsp_set_targets(&dsp, 48000, bands, 0, 0);
-    eq_dsp_apply(&dsp, pcm, EQ_SMOOTH_SAMPLES / 2, 1, &clips, NULL, NULL);
+    eq_dsp_apply(&dsp, pcm, EQ_SMOOTH_SAMPLES / 2, 1, EQ_DSP_OUTPUT_SOFT_LIMIT, &clips, NULL, NULL);
     ASSERT_TRUE(dsp.smooth_remaining > 0);
 
     eq_dsp_set_targets(&dsp, 48000, bands, -12000, 0);
@@ -599,26 +530,26 @@ static void test_sample_rate_change_resets_smoothing_and_delay_state(void) {
     eq_dsp_init(&dsp, 48000);
     eq_dsp_set_targets(&dsp, 48000, bands, EQ_DEFAULT_PREAMP_MDB, 1);
     eq_dsp_set_targets(&dsp, 48000, bands, 0, 1);
-    eq_dsp_apply(&dsp, pcm, 64, 1, &clips, NULL, NULL);
+    eq_dsp_apply(&dsp, pcm, 64, 1, EQ_DSP_OUTPUT_SOFT_LIMIT, &clips, NULL, NULL);
     ASSERT_TRUE(dsp.smooth_remaining > 0);
 
-    dsp.band_z[0][4].z1 = 123.0f;
-    dsp.band_z[0][4].z2 = -456.0f;
-    dsp.hpf_z[0].z1 = 789.0f;
-    dsp.hpf_z[0].z2 = -321.0f;
+    dsp.band_z[4].z1[0] = 123.0f;
+    dsp.band_z[4].z2[0] = -456.0f;
+    dsp.hpf_z.z1[0] = 789.0f;
+    dsp.hpf_z.z2[0] = -321.0f;
 
     bands[4] = -6000;
     eq_dsp_set_targets(&dsp, 44100, bands, -9000, 1);
 
     ASSERT_EQ_I32(dsp.sample_rate, 44100);
     ASSERT_EQ_I32(dsp.smooth_remaining, 0);
-    ASSERT_EQ_I32(dsp.active_band_enabled[4], 1);
-    ASSERT_EQ_I32(dsp.target_band_enabled[4], 1);
+    ASSERT_EQ_I32(dsp.active_band_enabled[4], EQ_CHANNEL_STEREO_MASK);
+    ASSERT_EQ_I32(dsp.target_band_enabled[4], EQ_CHANNEL_STEREO_MASK);
     ASSERT_TRUE(fabsf(dsp.preamp - dsp.target_preamp) < 0.000001f);
-    ASSERT_EQ_I32((int32_t)dsp.band_z[0][4].z1, 0);
-    ASSERT_EQ_I32((int32_t)dsp.band_z[0][4].z2, 0);
-    ASSERT_EQ_I32((int32_t)dsp.hpf_z[0].z1, 0);
-    ASSERT_EQ_I32((int32_t)dsp.hpf_z[0].z2, 0);
+    ASSERT_EQ_I32((int32_t)dsp.band_z[4].z1[0], 0);
+    ASSERT_EQ_I32((int32_t)dsp.band_z[4].z2[0], 0);
+    ASSERT_EQ_I32((int32_t)dsp.hpf_z.z1[0], 0);
+    ASSERT_EQ_I32((int32_t)dsp.hpf_z.z2[0], 0);
 }
 
 static void test_active_band_index_cache_tracks_enabled_bands_in_order(void) {
@@ -649,7 +580,7 @@ static void test_active_band_index_cache_tracks_enabled_bands_in_order(void) {
     ASSERT_EQ_I32(dsp.target_band_index[2], 6);
     ASSERT_EQ_I32(dsp.target_band_index[3], 9);
 
-    eq_dsp_apply(&dsp, pcm, 64, 2, &clips, NULL, NULL);
+    eq_dsp_apply(&dsp, pcm, 64, 2, EQ_DSP_OUTPUT_SOFT_LIMIT, &clips, NULL, NULL);
     ASSERT_EQ_I32(dsp.active_band_count, 4);
 }
 
@@ -680,11 +611,11 @@ static void test_split_blocks_match_single_block_for_full_stereo_preset(void) {
     eq_dsp_set_targets(&single, 48000, bands, -9000, 0);
     split = single;
 
-    eq_dsp_apply(&single, single_pcm, 512, 2, &single_clips, &single_peak_l, &single_peak_r);
+    eq_dsp_apply(&single, single_pcm, 512, 2, EQ_DSP_OUTPUT_SOFT_LIMIT, &single_clips, &single_peak_l, &single_peak_r);
 
     for (unsigned i = 0; i < sizeof(chunks) / sizeof(chunks[0]); ++i) {
         eq_dsp_apply(&split, &split_pcm[offset * 2], chunks[i], 2,
-            &split_clips, &split_peak_l, &split_peak_r);
+                     EQ_DSP_OUTPUT_SOFT_LIMIT, &split_clips, &split_peak_l, &split_peak_r);
         offset += chunks[i];
     }
 
@@ -701,22 +632,20 @@ static void test_split_blocks_match_single_block_for_full_stereo_preset(void) {
 int main(void) {
     test_left_channel_filter_state_does_not_bleed_into_right();
     test_negative_full_scale_peak_is_reported();
-    test_overflow_counts_before_limiter();
+    test_overload_soft_limits_and_counts_clips();
     test_smoothing_reaches_target();
     test_flat_eq_does_not_keep_active_band_filters();
     test_reapplying_same_targets_does_not_restart_smoothing();
     test_first_non_default_targets_snap_without_smoothing();
     test_out_of_place_apply_matches_in_place_and_preserves_input();
     test_high_gain_bursts_stay_bounded_over_many_blocks();
-    test_limiter_is_monotonic_for_positive_full_scale_ramp();
-    test_limiter_keeps_sustained_overload_near_soft_knee();
+    test_soft_limit_is_monotonic_for_positive_full_scale_ramp();
+    test_soft_limit_bounds_sustained_overload_and_counts_clips();
+    test_apo_exact_hard_saturates_and_counts_clips();
     test_extreme_target_values_are_clamped_before_coefficients();
-    test_invalid_delay_state_is_flushed_before_processing();
-    test_invalid_preamp_state_is_recovered();
-    test_invalid_smoothing_state_is_clamped_before_processing();
-    test_invalid_active_band_coefficients_are_recovered();
-    test_invalid_target_band_coefficients_are_disabled_before_smoothing();
-    test_invalid_hpf_coefficients_are_recomputed();
+    test_invalid_internal_state_is_recovered_at_target_commit();
+    test_invalid_delay_state_is_recovered_at_target_commit();
+    test_inactive_delay_state_is_recovered_before_band_is_enabled();
     test_hpf_delay_state_resets_when_hpf_target_changes();
     test_retargeting_mid_smoothing_starts_from_current_gain();
     test_sample_rate_change_resets_smoothing_and_delay_state();

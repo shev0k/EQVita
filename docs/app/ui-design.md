@@ -25,6 +25,7 @@ The main menu should show what people use most:
 - Equalizer;
 - Simple EQ;
 - Advanced EQ;
+- Parametric EQ;
 - Presets;
 - Music Preview;
 - Settings;
@@ -76,7 +77,8 @@ Advanced EQ is for people who want the full curve.
 Show:
 
 - preamp;
-- all EQ bands;
+- all 10 graphic-EQ bands, or all ordered operations in an imported Equalizer APO config;
+- the L/R channel scope, filter type, frequency, Q/S, gain, and `Copy` matrix for imported operations;
 - preset save controls.
 
 It should still feel like part of the app, not like a hidden debug page.
@@ -86,6 +88,10 @@ It should still feel like part of the app, not like a hidden debug page.
 Presets are saved sound profiles.
 
 Make it clear which slot is selected, what can be loaded, and what can be saved.
+
+Equalizer APO import is a first-class `Parametric EQ` item immediately below `Advanced EQ` on the main menu. `Presets` retains a `Parametric EQ` shortcut to the same screen. The child screen has one adjustable output selector plus assigned-file, choose, inspect/edit, clear, live-route, and assignment-count rows. This keeps three device profiles understandable without showing three near-identical file pickers.
+
+The `.txt` browser is rooted at `ur0:data/eqvita/peq/` and reports a useful file/line error. `Inspect / edit PEQ` opens the selected output in Advanced EQ. Output assignments persist separately from numbered preset slots. PEQ is an exclusive mode: graphic bands and Bass guard are off and APO Exact is locked until the selected output switches back to Simple EQ.
 
 Built-in presets are only a starting point. Different Vitas, headphones, Bluetooth speakers, and speaker mods can all react differently.
 

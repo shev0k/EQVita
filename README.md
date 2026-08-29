@@ -22,7 +22,7 @@ EQVita is a hobby homebrew project made to give the Vita a richer sound. It ship
 Install it, open the app, pick a preset, and make the Vita sound less flat.
 Nerd version: the plugin hooks `sceAudioOutOutput`, while the app handles presets, route hints, themes, logs, and boot state.
 
-Current app/plugin ABI: `1.14.0`.
+Current app/plugin ABI: `1.15.0`.
 
 Questions, setup help, preset sharing, and random EQVita ideas live in [Discussions](https://github.com/shev0k/EQVita/discussions). Issues are better for actual bugs with logs and steps.
 
@@ -53,6 +53,8 @@ The theme switcher exists because staring at EQ sliders should at least look cle
 ## Features
 
 - 10-band graphic EQ from `31 Hz` to `16 kHz`.
+- Equalizer APO `.txt` import for parametric EQ profiles.
+- Separate PEQ profiles for speakers, wired headphones, and Bluetooth.
 - Simple EQ mode for bass, mids, treble, and preamp.
 - Advanced EQ mode for every band and preamp.
 - Built-in `STOCK Depth` and `MOD Switch` presets.
@@ -60,7 +62,7 @@ The theme switcher exists because staring at EQ sliders should at least look cle
 - Music Preview for playing a local `OGG`, `MP3`, or `WAV` while tuning EQ.
 - Speaker-only mode or all-output mode for wired/Bluetooth too.
 - Optional HPF (Bass guard), which cuts very low rumble.
-- Safe, Loud, and Direct headroom modes.
+- Safe, Loud, Direct, and APO Exact headroom modes.
 - Vita-style app UI with themes. `Crimson Vita` is the default.
 - Boot persistence through `ur0:data/eqvita/boot.eqbs`.
 - App log at `ur0:data/eqvita/app.log`.
@@ -119,6 +121,8 @@ Files you may see there:
 - `boot.eqbs` - boot state.
 - `theme.cfg` - selected app theme.
 - `app.log` - useful log for bug reports.
+- `peq/` - Equalizer APO `.txt` profiles.
+- `output-peq.eqpf` - saved output-to-profile assignments.
 
 There are three preset slots. EQ changes apply live, and saving writes the current settings into the selected slot.
 
@@ -131,6 +135,20 @@ If you make a preset that sounds nice, please share it in this repo's [Discussio
 The boot state is what lets the plugin load your saved sound after reboot, before you open the app again.
 
 Old raw `preset%d.bin` files are imported read-only when a matching `.eqvp` file does not exist.
+
+## Equalizer APO Profiles
+
+Put Equalizer APO `.txt` files in:
+
+```text
+ur0:data/eqvita/peq/
+```
+
+Open `Parametric EQ`, choose speakers, wired headphones, or Bluetooth, then pick a file. You can give every output its own curve. If an output has no profile while PEQ routing is active, EQVita leaves that output alone instead of borrowing the wrong curve.
+
+One important bit: imported profiles use `APO Exact`. It keeps the file's preamp and filter order, then hard-clips anything that runs past the 16-bit output range. If it sounds crunchy, lower `Preamp` in the profile.
+
+The importer supports the useful stereo subset, not every Equalizer APO command. See [Using Equalizer APO Configs](docs/audio/equalizer-apo.md) for supported filters, `Copy`, `Include`, limits, and troubleshooting.
 
 ## Music Preview
 

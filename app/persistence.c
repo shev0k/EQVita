@@ -1,6 +1,7 @@
 #include "persistence.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef EQVITA_HOST_TESTS
@@ -17,6 +18,7 @@
 #define ACTIVE_SLOT_FILE_MAGIC 0x53504551u
 #define ACTIVE_SLOT_FILE_VERSION 1u
 #define ACTIVE_SLOT_FILE_MAX_SLOT_COUNT 3u
+#define PEQ_SEED_MAX_BYTES (256u * 1024u)
 
 typedef struct app_theme_file
 {
@@ -130,6 +132,41 @@ static int path_exists(const char *path)
         return sceIoGetstat(path, &st) >= 0;
     }
 #endif
+}
+
+static int path_is_directory(const char *path)
+{
+    if (!path) {
+        return 0;
+    }
+#ifdef EQVITA_HOST_TESTS
+    {
+        struct stat st;
+        return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+    }
+#else
+    {
+        SceIoStat st;
+        memset(&st, 0, sizeof(st));
+        return sceIoGetstat(path, &st) >= 0 && SCE_S_ISDIR(st.st_mode);
+    }
+#endif
+}
+
+static int ensure_directory(const char *path)
+{
+    if (!path || !*path) {
+        return -1;
+    }
+    if (path_is_directory(path)) {
+        return 0;
+    }
+#ifdef EQVITA_HOST_TESTS
+    (void)mkdir(path, 0777);
+#else
+    (void)sceIoMkdir(path, 0777);
+#endif
+    return path_is_directory(path) ? 0 : -1;
 }
 
 static void remove_file(const char *path)
@@ -325,26 +362,125 @@ static void ensure_data_dir(const char *dir)
 #endif
 }
 
+int eqvita_ensure_peq_dir(const char *dir)
+{
+    char peq_dir[256];
+
+    if (!dir ||
+        eqvita_build_data_path(peq_dir, sizeof(peq_dir), dir, EQVITA_PEQ_DIR_NAME) < 0) {
+        return -1;
+    }
+
+#ifndef EQVITA_HOST_TESTS
+    if (ensure_directory("ur0:data") < 0) {
+        return -1;
+    }
+#endif
+    if (ensure_directory(dir) < 0 || ensure_directory(peq_dir) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
+int eqvita_seed_peq_file(const char *dir, const char *name, const char *source_path)
+{
+    char peq_dir[256];
+    char destination[256];
+    unsigned int size = 0;
+    void *data;
+    int result;
+
+    if (!dir || !name || !*name || !source_path || !*source_path ||
+        strchr(name, '/') || strchr(name, '\\') || strchr(name, ':') ||
+        eqvita_build_data_path(peq_dir, sizeof(peq_dir), dir, EQVITA_PEQ_DIR_NAME) < 0 ||
+        eqvita_build_data_path(destination, sizeof(destination), peq_dir, name) < 0) {
+        return -1;
+    }
+    if (path_exists(destination)) {
+        return 1;
+    }
+    if (eqvita_ensure_peq_dir(dir) < 0 ||
+        file_size_bytes(source_path, &size) < 0 || size == 0 || size > PEQ_SEED_MAX_BYTES) {
+        return -1;
+    }
+
+    data = malloc(size);
+    if (!data) {
+        return -1;
+    }
+    if (read_file_exact(source_path, data, size) < 0) {
+        free(data);
+        return -1;
+    }
+    result = atomic_write_file(destination, data, size);
+    free(data);
+    return result < 0 ? result : 0;
+}
+
+int eqvita_load_route_profiles(
+    const char *dir,
+    eq_route_profile_bank_t *out_bank,
+    char out_source_names[EQ_ROUTE_PROFILE_COUNT][EQ_ROUTE_PROFILE_SOURCE_NAME_MAX])
+{
+    char path[256];
+    eq_route_profile_file_t file;
+
+    if (!dir || !out_bank ||
+        eqvita_build_data_path(path, sizeof(path), dir, EQVITA_OUTPUT_PEQ_NAME) < 0 ||
+        read_file_exact(path, &file, sizeof(file)) < 0) {
+        return -1;
+    }
+    return eq_route_profile_file_extract(&file, out_bank, out_source_names);
+}
+
+int eqvita_save_route_profiles(
+    const char *dir,
+    const eq_route_profile_bank_t *bank,
+    const char source_names[EQ_ROUTE_PROFILE_COUNT][EQ_ROUTE_PROFILE_SOURCE_NAME_MAX])
+{
+    char path[256];
+    eq_route_profile_file_t file;
+
+    if (!dir || !bank ||
+        eqvita_build_data_path(path, sizeof(path), dir, EQVITA_OUTPUT_PEQ_NAME) < 0) {
+        return -1;
+    }
+
+    ensure_data_dir(dir);
+    eq_route_profile_file_build(&file, bank, source_names);
+    return atomic_write_file(path, &file, sizeof(file));
+}
+
 int eqvita_load_boot_state(const char *dir, eq_control_t *out)
 {
     char path[256];
-    eq_boot_state_file_t state;
+    unsigned int size = 0;
 
     if (!dir || !out || eqvita_build_data_path(path, sizeof(path), dir, EQVITA_BOOT_STATE_NAME) < 0) {
         return -1;
     }
 
-    if (read_file_exact(path, &state, sizeof(state)) < 0) {
+    if (file_size_bytes(path, &size) < 0) {
         return -1;
     }
-
-    return eq_boot_state_extract_control(&state, out);
+    if (size == sizeof(eq_boot_state_file_t)) {
+        eq_boot_state_file_t state;
+        if (read_file_exact(path, &state, sizeof(state)) == 0) {
+            return eq_boot_state_extract_control(&state, out);
+        }
+    } else if (size == sizeof(eq_legacy_boot_state_file_v1_t)) {
+        eq_legacy_boot_state_file_v1_t state;
+        if (read_file_exact(path, &state, sizeof(state)) == 0) {
+            return eq_legacy_boot_state_extract_control(&state, out);
+        }
+    }
+    return -1;
 }
 
 int eqvita_load_preset(const char *dir, int slot, eq_control_t *out, int *legacy_loaded)
 {
     char path[256];
-    eq_preset_file_t preset;
+    unsigned int size = 0;
     eq_preset_primary_status_t primary_status = EQ_PRESET_PRIMARY_MISSING;
 
     if (legacy_loaded) {
@@ -354,9 +490,22 @@ int eqvita_load_preset(const char *dir, int slot, eq_control_t *out, int *legacy
         return -1;
     }
 
-    if (read_file_exact(path, &preset, sizeof(preset)) == 0) {
-        if (eq_preset_extract_control(&preset, out) == 0) {
-            return 0;
+    if (file_size_bytes(path, &size) == 0) {
+        if (size == sizeof(eq_preset_file_t)) {
+            eq_preset_file_t preset;
+            if (read_file_exact(path, &preset, sizeof(preset)) == 0 &&
+                eq_preset_extract_control(&preset, out) == 0) {
+                return 0;
+            }
+        } else if (size == sizeof(eq_legacy_preset_file_v2_t)) {
+            eq_legacy_preset_file_v2_t preset;
+            if (read_file_exact(path, &preset, sizeof(preset)) == 0 &&
+                eq_legacy_preset_extract_control(&preset, out) == 0) {
+                if (legacy_loaded) {
+                    *legacy_loaded = 1;
+                }
+                return 0;
+            }
         }
         primary_status = EQ_PRESET_PRIMARY_INVALID;
     }
@@ -370,9 +519,9 @@ int eqvita_load_preset(const char *dir, int slot, eq_control_t *out, int *legacy
     }
 
     {
-        eq_control_t legacy;
-        if (read_file_exact(path, &legacy, sizeof(legacy)) == 0 && eq_control_validate(&legacy) == 0) {
-            *out = legacy;
+        eq_legacy_control_v1_14_t legacy;
+        if (read_file_exact(path, &legacy, sizeof(legacy)) == 0 &&
+            eq_control_import_legacy(out, &legacy) == 0) {
             if (legacy_loaded) {
                 *legacy_loaded = 1;
             }

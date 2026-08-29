@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   host-tests:
     runs-on: ubuntu-latest
@@ -26,7 +29,49 @@ jobs:
       - name: WSL shell build script guard tests
         run: bash scripts/test-wsl-shell-validation.sh
 
-      - name: Release hygiene checks
+  security-checks:
+    name: Strict host sanitizers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure with ASan and UBSan
+        run: >-
+          cmake -S . -B build-sanitize
+          -DEQVITA_HOST_TESTS=ON
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_C_FLAGS="-Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Build
+        run: cmake --build build-sanitize --parallel
+
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --test-dir build-sanitize --output-on-failure
+
+  armv7-qemu:
+    name: ARMv7 Cortex-A9 tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ARM compiler and QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabihf qemu-user
+
+      - name: Run ARMv7 tests
+        run: bash scripts/test-armv7-qemu.sh
+
+  release-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check release inputs
         shell: pwsh
         run: ./scripts/check-release-hygiene.ps1
 

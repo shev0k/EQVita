@@ -466,7 +466,7 @@ static void test_output_hook_times_pre_output_preparation(void)
     free(source);
 }
 
-static void test_route_detection_gates_controller_headphone_probe(void)
+static void test_route_detection_throttles_wired_without_new_kernel_dependencies(void)
 {
     char path[512];
     char *source;
@@ -484,8 +484,7 @@ static void test_route_detection_gates_controller_headphone_probe(void)
 
     helper_start = strstr(source, "static int should_probe_wired_headphone");
     ASSERT_TRUE(helper_start != NULL);
-    ASSERT_TRUE(strstr(helper_start, "EQ_ROUTE_SPEAKER") != NULL);
-    ASSERT_TRUE(strstr(helper_start, "EQ_ROUTE_UNKNOWN") != NULL);
+    ASSERT_TRUE(strstr(helper_start, "return 1") != NULL);
 
     ASSERT_TRUE(strstr(source, "EQ_WIRED_HEADPHONE_PROBE_INTERVAL") != NULL);
     countdown_decl = strstr(source, "static uint32_t g_wired_headphone_probe_countdown");
@@ -510,8 +509,53 @@ static void test_route_detection_gates_controller_headphone_probe(void)
     ASSERT_TRUE(probe_guard != NULL);
     ASSERT_TRUE(probe_guard < probe_call);
     ASSERT_TRUE(strstr(detect_start, "wired_headphones_connected = g_cached_wired_headphones_connected") != NULL);
+    ASSERT_TRUE(strstr(source, "SceBtForDriver") == NULL);
+    ASSERT_TRUE(strstr(source, "ksceBt") == NULL);
+    ASSERT_TRUE(strstr(source, "route_probe_thread") == NULL);
+    ASSERT_TRUE(range_contains(detect_start, detect_end, "eq_route_select(route_hint"));
+
+    {
+        char *hook_start = strstr(source, "static int sceAudioOutOutput_hook");
+        char *hook_end = strstr(hook_start + 1, "static int sceAudioOutOpenPort_hook");
+        ASSERT_TRUE(hook_start != NULL);
+        ASSERT_TRUE(hook_end != NULL);
+        ASSERT_TRUE(!range_contains(hook_start, hook_end, "ksceBt"));
+    }
 
     free(source);
+}
+
+static void test_output_route_profiles_are_atomic_and_exported(void)
+{
+    char path[512];
+    char *source;
+    char *exports;
+    char *hook_start;
+    char *hook_end;
+
+    snprintf(path, sizeof(path), "%s/plugin/main.c", EQVITA_SOURCE_DIR);
+    source = read_file(path);
+    ASSERT_TRUE(strstr(source, "static eq_route_profile_bank_t g_route_profiles") != NULL);
+    ASSERT_TRUE(strstr(source, "publish_route_profiles_locked") != NULL);
+    ASSERT_TRUE(strstr(source, "copy_route_profile_snapshot") != NULL);
+    ASSERT_TRUE(strstr(source, "int EqSetRouteProfiles") != NULL);
+    ASSERT_TRUE(strstr(source, "load_route_profiles_kernel") != NULL);
+
+    hook_start = strstr(source, "static int sceAudioOutOutput_hook");
+    ASSERT_TRUE(hook_start != NULL);
+    hook_end = strstr(hook_start + 1, "static int sceAudioOutOpenPort_hook");
+    ASSERT_TRUE(hook_end != NULL);
+    ASSERT_TRUE(range_contains(hook_start, hook_end, "copy_route_profile_snapshot"));
+    ASSERT_TRUE(range_contains(hook_start, hook_end, "EQ_BYPASS_NO_ROUTE_PROFILE"));
+    ASSERT_TRUE(range_contains(hook_start, hook_end, "&control"));
+    ASSERT_TRUE(strstr(source, "eq_route_profile_bank_t route_control") == NULL);
+    ASSERT_TRUE(strstr(source, "g_route_profiles_staging") != NULL);
+    free(source);
+
+    snprintf(path, sizeof(path), "%s/plugin/exports.yml", EQVITA_SOURCE_DIR);
+    exports = read_file(path);
+    ASSERT_TRUE(strstr(exports, "- EqSetRouteProfiles") != NULL);
+    free(exports);
 }
 
 static void test_output_hook_does_not_update_route_stale_counter_per_block(void)
@@ -725,9 +769,13 @@ static void test_output_hook_does_not_restore_caller_buffer_after_original_outpu
 
     ASSERT_TRUE(!range_contains(copy_original, hook_end, "memcpy(processing_port->scratch, processing_port->original, processing_bytes)"));
 
-    apply_to_call = strstr(copy_original, "eq_dsp_apply_to(&processing_port->dsp, processing_port->original, processing_port->scratch");
+    apply_to_call = strstr(copy_original, "eq_dsp_apply_to(&processing_port->dsp");
     ASSERT_TRUE(apply_to_call != NULL);
     ASSERT_TRUE(apply_to_call < hook_end);
+    ASSERT_TRUE(range_contains(apply_to_call, hook_end,
+                               "eq_control_get_headroom_mode(&control) == EQ_HEADROOM_EXACT"));
+    ASSERT_TRUE(range_contains(apply_to_call, hook_end, "EQ_DSP_OUTPUT_HARD_CLIP"));
+    ASSERT_TRUE(range_contains(apply_to_call, hook_end, "EQ_DSP_OUTPUT_SOFT_LIMIT"));
 
     copy_processed = strstr(apply_to_call, "ksceKernelCopyToUser((void *)buf, processing_port->scratch, processing_bytes)");
     ASSERT_TRUE(copy_processed != NULL);
@@ -978,15 +1026,17 @@ static void test_kernel_boot_preset_reads_require_exact_file_size(void)
     boot_end = strstr(boot_start + 1, "static void load_preset_kernel");
     ASSERT_TRUE(boot_end != NULL);
     ASSERT_TRUE(range_contains(boot_start, boot_end, "kernel_read_exact(fd, &state, sizeof(state))"));
+    ASSERT_TRUE(range_contains(boot_start, boot_end, "kernel_read_exact(fd, &legacy_state, sizeof(legacy_state))"));
     ASSERT_TRUE(!range_contains(boot_start, boot_end, "ksceIoRead(fd, &state"));
 
     preset_start = boot_end;
     preset_end = strstr(preset_start + 1, "static void set_defaults");
     ASSERT_TRUE(preset_end != NULL);
     ASSERT_TRUE(range_contains(preset_start, preset_end, "kernel_read_exact(fd, &preset, sizeof(preset))"));
-    ASSERT_TRUE(range_contains(preset_start, preset_end, "kernel_read_exact(fd, &tmp, sizeof(tmp))"));
+    ASSERT_TRUE(range_contains(preset_start, preset_end, "kernel_read_exact(fd, &legacy_preset, sizeof(legacy_preset))"));
+    ASSERT_TRUE(range_contains(preset_start, preset_end, "kernel_read_exact(fd, &legacy, sizeof(legacy))"));
     ASSERT_TRUE(!range_contains(preset_start, preset_end, "ksceIoRead(fd, &preset"));
-    ASSERT_TRUE(!range_contains(preset_start, preset_end, "ksceIoRead(fd, &tmp"));
+    ASSERT_TRUE(!range_contains(preset_start, preset_end, "ksceIoRead(fd, &legacy"));
 
     free(source);
 }
@@ -1258,16 +1308,16 @@ static void test_dsp_smoothing_scratch_arrays_are_not_declared_inside_frame_loop
     ASSERT_TRUE(frame_loop != NULL);
     ASSERT_TRUE(frame_loop < fn_end);
 
-    smooth_band_decl = strstr(fn_start, "eq_biquad_t smooth_band[EQ_BANDS]");
+    smooth_band_decl = strstr(fn_start, "eq_biquad_t smooth_band[EQ_PARAMETRIC_FILTERS]");
     ASSERT_TRUE(smooth_band_decl != NULL);
     ASSERT_TRUE(smooth_band_decl < frame_loop);
 
-    smooth_enabled_decl = strstr(fn_start, "uint8_t smooth_band_enabled[EQ_BANDS]");
+    smooth_enabled_decl = strstr(fn_start, "uint8_t smooth_band_enabled[EQ_PARAMETRIC_FILTERS]");
     ASSERT_TRUE(smooth_enabled_decl != NULL);
     ASSERT_TRUE(smooth_enabled_decl < frame_loop);
 
-    ASSERT_TRUE(!range_contains(frame_loop, fn_end, "eq_biquad_t smooth_band[EQ_BANDS]"));
-    ASSERT_TRUE(!range_contains(frame_loop, fn_end, "uint8_t smooth_band_enabled[EQ_BANDS]"));
+    ASSERT_TRUE(!range_contains(frame_loop, fn_end, "eq_biquad_t smooth_band[EQ_PARAMETRIC_FILTERS]"));
+    ASSERT_TRUE(!range_contains(frame_loop, fn_end, "uint8_t smooth_band_enabled[EQ_PARAMETRIC_FILTERS]"));
 
     free(source);
 }
@@ -1292,8 +1342,9 @@ static void test_dsp_steady_state_band_loop_avoids_smoothing_branch_work(void)
     steady_end = strstr(generic_start + 1, "void eq_dsp_apply_to");
     ASSERT_TRUE(steady_end != NULL);
 
-    ASSERT_TRUE(range_contains(stereo_start, steady_end, "for (uint8_t i = 0; i < active_count; ++i)"));
-    ASSERT_TRUE(range_contains(stereo_start, steady_end, "active_band_index"));
+    ASSERT_TRUE(range_contains(stereo_start, steady_end,
+                               "for (uint8_t operation = 0; operation < state->active_operation_count; ++operation)"));
+    ASSERT_TRUE(range_contains(stereo_start, steady_end, "active_operation_type"));
     ASSERT_TRUE(!range_contains(stereo_start, steady_end, "smoothing_now"));
     ASSERT_TRUE(!range_contains(stereo_start, steady_end, "smooth_band"));
 
@@ -1382,29 +1433,108 @@ static void test_dsp_apply_has_stereo_steady_state_fast_path(void)
     free(source);
 }
 
-static void test_dsp_hot_sample_helpers_avoid_finite_checks(void)
+static void test_dsp_hot_biquad_helper_avoids_finite_checks(void)
 {
     char path[512];
     char *source;
-    char *limit_start;
-    char *limit_end;
     char *biquad_start;
     char *biquad_end;
 
     snprintf(path, sizeof(path), "%s/plugin/dsp.c", EQVITA_SOURCE_DIR);
     source = read_file(path);
 
-    limit_start = strstr(source, "static inline int16_t limit_i16");
-    ASSERT_TRUE(limit_start != NULL);
-    limit_end = strstr(limit_start + 1, "static inline uint16_t abs_i16_peak");
-    ASSERT_TRUE(limit_end != NULL);
-    ASSERT_TRUE(!range_contains(limit_start, limit_end, "isfinite"));
-
     biquad_start = strstr(source, "static inline float process_biquad");
     ASSERT_TRUE(biquad_start != NULL);
     biquad_end = strstr(biquad_start + 1, "void eq_dsp_apply_to");
     ASSERT_TRUE(biquad_end != NULL);
     ASSERT_TRUE(!range_contains(biquad_start, biquad_end, "isfinite"));
+
+    free(source);
+}
+
+static void test_dsp_audio_callback_avoids_runtime_recovery_scans(void)
+{
+    char path[512];
+    char *source;
+    char *apply_start;
+    char *apply_end;
+    char *steady_guard;
+
+    snprintf(path, sizeof(path), "%s/plugin/dsp.c", EQVITA_SOURCE_DIR);
+    source = read_file(path);
+
+    apply_start = strstr(source, "void eq_dsp_apply_to");
+    ASSERT_TRUE(apply_start != NULL);
+    apply_end = strstr(apply_start + 1, "void eq_dsp_apply(");
+    ASSERT_TRUE(apply_end != NULL);
+    steady_guard = strstr(apply_start, "if (state->smooth_remaining == 0)");
+    ASSERT_TRUE(steady_guard != NULL);
+    ASSERT_TRUE(steady_guard < apply_end);
+
+    ASSERT_TRUE(!range_contains(apply_start, apply_end, "sanitize_preamp_state("));
+    ASSERT_TRUE(!range_contains(apply_start, apply_end, "sanitize_smoothing_state("));
+    ASSERT_TRUE(!range_contains(apply_start, apply_end, "sanitize_biquad_state("));
+    ASSERT_TRUE(!range_contains(apply_start, apply_end, "sanitize_delay_state("));
+    ASSERT_TRUE(!range_contains(apply_start, steady_guard, "rebuild_active_stereo_coefficients("));
+
+    free(source);
+}
+
+static void test_dsp_has_cortex_a9_neon_kernel_with_inline_vcvtr(void)
+{
+    char path[512];
+    char *source;
+    char *kernel_start;
+    char *kernel_end;
+    char *hard_start;
+    char *hard_end;
+    char *apply_start;
+    char *apply_end;
+    char *last_limit;
+    char *first_round;
+    char *last_round;
+    char *first_narrow;
+
+    snprintf(path, sizeof(path), "%s/plugin/dsp.c", EQVITA_SOURCE_DIR);
+    source = read_file(path);
+
+    ASSERT_TRUE(strstr(source, "#if defined(__ARM_NEON)") != NULL);
+    ASSERT_TRUE(strstr(source, "__aarch64__") == NULL);
+    kernel_start = strstr(source, "process_stereo_steady_neon_core");
+    ASSERT_TRUE(kernel_start != NULL);
+    kernel_end = strstr(kernel_start + 1, "process_stereo_steady_neon_hard_clip");
+    ASSERT_TRUE(kernel_end != NULL);
+    hard_start = kernel_end;
+    hard_end = strstr(hard_start + 1, "process_stereo_steady_neon_soft_limit");
+    ASSERT_TRUE(hard_end != NULL);
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "while (frames >= 4u)"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmla_f32"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vceqq_f32"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmvnq_u32"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmaxq_f32"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vminq_f32"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "clip_count"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vcvtr.s32.f32"));
+    last_limit = strstr(kernel_start, "EQ_NEON_HARD_CLIP_FOUR(x0, x1, x2, x3)");
+    first_round = strstr(kernel_start, "EQ_VFP_ROUND_PAIR(x0, rounded0)");
+    last_round = strstr(kernel_start, "EQ_VFP_ROUND_PAIR(x3, rounded3)");
+    first_narrow = strstr(kernel_start, "packed0 = vmovn_s32");
+    ASSERT_TRUE(last_limit != NULL);
+    ASSERT_TRUE(first_round != NULL);
+    ASSERT_TRUE(last_round != NULL);
+    ASSERT_TRUE(first_narrow != NULL);
+    ASSERT_TRUE(last_limit < first_round);
+    ASSERT_TRUE(first_round < last_round);
+    ASSERT_TRUE(last_round < first_narrow);
+    ASSERT_TRUE(!range_contains(kernel_start, kernel_end, "vfma"));
+    ASSERT_TRUE(range_contains(hard_start, hard_end, "process_stereo_steady_neon_core"));
+    ASSERT_TRUE(range_contains(hard_start, hard_end, "EQ_DSP_OUTPUT_HARD_CLIP"));
+    apply_start = strstr(source, "void eq_dsp_apply_to");
+    ASSERT_TRUE(apply_start != NULL);
+    apply_end = strstr(apply_start + 1, "void eq_dsp_apply(");
+    ASSERT_TRUE(apply_end != NULL);
+    ASSERT_TRUE(range_contains(apply_start, apply_end, "vmrs %0, fpscr"));
+    ASSERT_TRUE(range_contains(apply_start, apply_end, "vmsr fpscr, %0"));
 
     free(source);
 }
@@ -1579,7 +1709,8 @@ int main(void)
     test_output_hook_updates_status_after_original_output();
     test_output_hook_marks_failed_original_output_inactive_before_status();
     test_output_hook_times_pre_output_preparation();
-    test_route_detection_gates_controller_headphone_probe();
+    test_route_detection_throttles_wired_without_new_kernel_dependencies();
+    test_output_route_profiles_are_atomic_and_exported();
     test_output_hook_does_not_update_route_stale_counter_per_block();
     test_output_hook_uses_cached_control_if_snapshot_is_busy();
     test_output_hook_bypasses_same_buffer_retry_only_when_buffer_may_still_be_processed();
@@ -1605,7 +1736,9 @@ int main(void)
     test_dsp_apply_has_steady_state_fast_path();
     test_dsp_state_caches_active_band_indexes();
     test_dsp_apply_has_stereo_steady_state_fast_path();
-    test_dsp_hot_sample_helpers_avoid_finite_checks();
+    test_dsp_hot_biquad_helper_avoids_finite_checks();
+    test_dsp_audio_callback_avoids_runtime_recovery_scans();
+    test_dsp_has_cortex_a9_neon_kernel_with_inline_vcvtr();
     test_speaker_retarget_honors_hpf_control_before_folding_31hz();
     test_output_hook_records_slowest_block_context();
     test_output_hook_measures_total_time_and_deadline_margin();

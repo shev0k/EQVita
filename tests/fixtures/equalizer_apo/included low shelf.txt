@@ -1,0 +1,2 @@
+# Synthetic included low shelf.
+Filter: ON LSC Fc 80 Hz Gain 2 dB Q 0.7

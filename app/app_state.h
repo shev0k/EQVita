@@ -34,3 +34,10 @@ void eqvita_app_state_mark_current_preset_saved(eqvita_app_state_t *state);
 int eqvita_app_state_current_preset_dirty(const eqvita_app_state_t *state);
 void eqvita_app_state_set_status_stale(eqvita_app_state_t *state, int stale);
 int eqvita_app_state_status_stale(const eqvita_app_state_t *state);
+int eqvita_app_state_prepare_route_profile_candidate(
+    const eq_route_profile_bank_t *current_bank,
+    const char current_source_names[EQ_ROUTE_PROFILE_COUNT][EQ_ROUTE_PROFILE_SOURCE_NAME_MAX],
+    uint8_t route,
+    const eq_control_t *control,
+    eq_route_profile_bank_t *out_bank,
+    char out_source_names[EQ_ROUTE_PROFILE_COUNT][EQ_ROUTE_PROFILE_SOURCE_NAME_MAX]);

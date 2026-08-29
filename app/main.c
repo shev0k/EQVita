@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "app_state.h"
+#include "equalizer_apo.h"
 #include "media_browser.h"
 #include "media_player.h"
 #include "persistence.h"
@@ -22,6 +23,10 @@
 #define STEP_COARSE 1000
 #define PRESET_SYNC_FAILED -4
 #define APP_LOG_PATH EQVITA_DATA_DIR "/" EQVITA_APP_LOG_NAME
+#define BUNDLED_PEQ_NAME "pch-1000.txt"
+#define BUNDLED_PEQ_SOURCE "app0:assets/peq/pch-1000.txt"
+#define APO_IMPORT_MAX_FILES 32u
+#define APO_IMPORT_MAX_TOTAL_BYTES (512u * 1024u)
 #define STATUS_LOG_INTERVAL_US 5000000u
 #define STATUS_LOG_PREVIEW_INTERVAL_US 12000000u
 #define DIAGNOSTIC_DRAIN_INTERVAL_US 1000000u
@@ -33,6 +38,18 @@
 #define ANALOG_NAV_DEADZONE 60
 #define BROWSER_THREAD_PRIORITY 0x80
 #define BROWSER_THREAD_STACK (32 * 1024)
+
+static const char *const g_apo_import_roots[] = {
+    "ur0:data/",
+    "ux0:data/"
+};
+
+static const eqvita_apo_import_policy_t g_apo_import_policy = {
+    g_apo_import_roots,
+    sizeof(g_apo_import_roots) / sizeof(g_apo_import_roots[0]),
+    APO_IMPORT_MAX_FILES,
+    APO_IMPORT_MAX_TOTAL_BYTES
+};
 
 #define SCE_AVCONFIG_VOLCTRL_ONBOARD 1
 #define SCE_AVCONFIG_VOLCTRL_BLUETOOTH 2
@@ -49,6 +66,7 @@ typedef enum app_screen
     SCREEN_HOME = 0,
     SCREEN_STATUS,
     SCREEN_PRESETS,
+    SCREEN_OUTPUT_PEQ,
     SCREEN_SIMPLE,
     SCREEN_ADVANCED,
     SCREEN_MUSIC,
@@ -62,6 +80,18 @@ typedef enum app_screen
 static const char *band_labels[EQ_BANDS] = {
     "31 Hz", "62 Hz", "125 Hz", "250 Hz", "500 Hz", "1 kHz", "2 kHz", "4 kHz", "8 kHz", "16 kHz"
 };
+
+#define HOME_ROW_ENABLED 0
+#define HOME_ROW_SIMPLE 1
+#define HOME_ROW_ADVANCED 2
+#define HOME_ROW_PARAMETRIC 3
+#define HOME_ROW_PRESETS 4
+#define HOME_ROW_MUSIC 5
+#define HOME_ROW_THEMES 6
+#define HOME_ROW_SETTINGS 7
+#define HOME_ROW_STATUS 8
+#define HOME_ROW_ABOUT 9
+#define HOME_ROW_COUNT 10
 
 #define STATUS_ROW_EQ_STATUS 0
 #define STATUS_ROW_OUTPUT 1
@@ -84,10 +114,21 @@ static const char *band_labels[EQ_BANDS] = {
 #define PRESETS_ROW_STOCK_DEPTH 1
 #define PRESETS_ROW_MOD_SWITCH 2
 #define PRESETS_ROW_ACTIONS_SECTION 3
-#define PRESETS_ROW_SAVE 4
-#define PRESETS_ROW_LOAD 5
-#define PRESETS_ROW_RESET 6
-#define PRESETS_ROW_COUNT 7
+#define PRESETS_ROW_OUTPUT_PEQ 4
+#define PRESETS_ROW_SAVE 5
+#define PRESETS_ROW_LOAD 6
+#define PRESETS_ROW_RESET 7
+#define PRESETS_ROW_COUNT 8
+
+#define OUTPUT_PEQ_ROW_TARGET 0
+#define OUTPUT_PEQ_ROW_ASSIGNED 1
+#define OUTPUT_PEQ_ROW_CHOOSE 2
+#define OUTPUT_PEQ_ROW_INSPECT 3
+#define OUTPUT_PEQ_ROW_CLEAR 4
+#define OUTPUT_PEQ_ROW_INFO_SECTION 5
+#define OUTPUT_PEQ_ROW_LIVE 6
+#define OUTPUT_PEQ_ROW_SWITCHING 7
+#define OUTPUT_PEQ_ROW_COUNT 8
 
 #define SIMPLE_ROW_PREAMP 0
 #define SIMPLE_ROW_BASS 1
@@ -103,7 +144,7 @@ static const char *band_labels[EQ_BANDS] = {
 
 #define ADV_ROW_PREAMP 0
 #define ADV_BAND_ROW_BASE 1
-#define ADV_ROW_PRESET_SECTION (ADV_BAND_ROW_BASE + EQ_BANDS)
+#define ADV_ROW_PRESET_SECTION (ADV_BAND_ROW_BASE + advanced_eq_value_row_count())
 #define ADV_ROW_PRESET_SLOT (ADV_ROW_PRESET_SECTION + 1)
 #define ADV_ROW_SAVE_CURRENT (ADV_ROW_PRESET_SECTION + 2)
 #define ADV_ROW_SAVE_NEXT (ADV_ROW_PRESET_SECTION + 3)
@@ -153,11 +194,29 @@ static eqvita_app_state_t g_app_state;
 #define g_control (g_app_state.control)
 #define g_preset_slot (g_app_state.preset_slot)
 
+static int advanced_eq_value_row_count(void)
+{
+    return g_control.eq_mode == EQ_MODE_PARAMETRIC ?
+        g_control.parametric_filter_count : EQ_BANDS;
+}
+
+static int advanced_row_is_eq_value(int row)
+{
+    return row >= ADV_BAND_ROW_BASE &&
+        row < ADV_BAND_ROW_BASE + advanced_eq_value_row_count();
+}
+
 static eq_status_t g_status;
 static eq_version_t g_version;
 static eqvita_media_player_t g_media_player;
 static eqvita_media_player_status_t g_media_status;
 static eqvita_media_listing_t g_media_listing;
+typedef enum browser_purpose
+{
+    BROWSER_PURPOSE_MUSIC = 0,
+    BROWSER_PURPOSE_EQUALIZER_APO = 1
+} browser_purpose_t;
+
 typedef struct media_browser_async
 {
     SceUID thread_id;
@@ -167,11 +226,16 @@ typedef struct media_browser_async
     volatile int completed;
     int roots;
     int result;
+    eqvita_media_file_filter_t filter;
     char path[EQVITA_MEDIA_MAX_PATH];
+    char root_path[EQVITA_MEDIA_MAX_PATH];
     eqvita_media_listing_t listing;
 } media_browser_async_t;
 
 static media_browser_async_t g_browser_async;
+static browser_purpose_t g_browser_purpose = BROWSER_PURPOSE_MUSIC;
+static app_screen_t g_peq_browser_return_screen = SCREEN_PRESETS;
+static app_screen_t g_output_peq_return_screen = SCREEN_PRESETS;
 static int g_plugin_compatible = 0;
 static char g_message[96];
 static int g_message_frames = 0;
@@ -189,10 +253,15 @@ static int g_confirm_button = SCE_CTRL_CROSS;
 static int g_cancel_button = SCE_CTRL_CIRCLE;
 
 static app_screen_t g_screen = SCREEN_HOME;
+static app_screen_t g_eq_return_screen = SCREEN_HOME;
 static int g_selected[SCREEN_COUNT];
 static int g_scroll_top[SCREEN_COUNT];
 static eq_control_t g_eq_entry_control;
 static int g_eq_entry_valid = 0;
+static eq_route_profile_bank_t g_route_profiles;
+static char g_route_profile_sources[EQ_ROUTE_PROFILE_COUNT][EQ_ROUTE_PROFILE_SOURCE_NAME_MAX];
+static uint8_t g_route_profile_edit_route = EQ_ROUTE_SPEAKER;
+static int g_route_profiles_save_failed = 0;
 static int g_exit_prompt_active = 0;
 static int g_exit_prompt_selected = 0;
 static eq_ui_row_bounds_t g_row_bounds[EQ_UI_MAX_VISIBLE_ROWS];
@@ -251,6 +320,22 @@ static void app_log(const char *fmt, ...)
     }
     line[len] = '\0';
     eqvita_append_log_line(EQVITA_DATA_DIR, line);
+}
+
+static int prepare_peq_library(void)
+{
+    int directory_result = eqvita_ensure_peq_dir(EQVITA_DATA_DIR);
+    int seed_result = directory_result == 0 ?
+        eqvita_seed_peq_file(EQVITA_DATA_DIR,
+                             BUNDLED_PEQ_NAME,
+                             BUNDLED_PEQ_SOURCE) : -1;
+
+    app_log("peq-library: path=%s ready=%d bundled=%s seed=%d",
+            EQVITA_PEQ_DIR,
+            directory_result == 0 ? 1 : 0,
+            BUNDLED_PEQ_NAME,
+            seed_result);
+    return directory_result;
 }
 
 static int elapsed_us(uint32_t now, uint32_t last, uint32_t interval)
@@ -370,8 +455,15 @@ static int browser_async_thread(unsigned int args, void *argp)
         return -1;
     }
 
-    result = job->roots ? eqvita_media_browser_read_roots(&job->listing)
-                        : eqvita_media_browser_read_dir(&job->listing, job->path);
+    result = job->roots ? eqvita_media_browser_read_roots(&job->listing) :
+             job->root_path[0] ?
+                eqvita_media_browser_read_dir_filtered_at_root(&job->listing,
+                                                                job->path,
+                                                                job->filter,
+                                                                job->root_path) :
+                eqvita_media_browser_read_dir_filtered(&job->listing,
+                                                        job->path,
+                                                        job->filter);
 
     browser_async_lock();
     job->result = result;
@@ -403,13 +495,20 @@ static void browser_async_cancel(void)
     browser_async_unlock();
 }
 
-static int browser_async_start(const char *path, int roots)
+static int browser_async_start(const char *path,
+                               int roots,
+                               eqvita_media_file_filter_t filter,
+                               const char *root_path)
 {
     media_browser_async_t *job = &g_browser_async;
     SceUID thread_id;
     int ret;
 
     browser_async_cancel();
+
+    if (roots || root_path) {
+        memset(&g_media_listing, 0, sizeof(g_media_listing));
+    }
 
     if (!roots && is_ux0_music_path(path) && !g_music_mounted) {
         ensure_music_mounted("browser-open");
@@ -420,9 +519,14 @@ static int browser_async_start(const char *path, int roots)
     g_browser_async.completed = 0;
     g_browser_async.roots = roots ? 1 : 0;
     g_browser_async.result = -1;
+    g_browser_async.filter = filter;
     g_browser_async.path[0] = '\0';
+    g_browser_async.root_path[0] = '\0';
     if (path) {
         snprintf(g_browser_async.path, sizeof(g_browser_async.path), "%s", path);
+    }
+    if (root_path) {
+        snprintf(g_browser_async.root_path, sizeof(g_browser_async.root_path), "%s", root_path);
     }
     memset(&g_browser_async.listing, 0, sizeof(g_browser_async.listing));
     browser_async_unlock();
@@ -500,7 +604,8 @@ static void browser_async_poll(void)
         set_message("Could not open folder (%d)", result);
         app_log("browser: open-failed path=%s error=%d", path, result);
         if (!g_media_listing.path[0]) {
-            change_screen(SCREEN_MUSIC);
+            change_screen(g_browser_purpose == BROWSER_PURPOSE_EQUALIZER_APO ?
+                          g_peq_browser_return_screen : SCREEN_MUSIC);
         }
         return;
     }
@@ -508,7 +613,9 @@ static void browser_async_poll(void)
     g_selected[SCREEN_MUSIC_BROWSER] = 0;
     g_scroll_top[SCREEN_MUSIC_BROWSER] = 0;
     if (result == 0) {
-        set_message(roots ? "No storage found" : "No music files here");
+        set_message(roots ? "No storage found" :
+                    g_browser_purpose == BROWSER_PURPOSE_EQUALIZER_APO ?
+                        "No .txt configs here" : "No music files here");
         if (roots) {
             app_log("browser: no-storage result=%d", result);
         }
@@ -584,6 +691,7 @@ static const char *bypass_reason_str(uint8_t r)
         case EQ_BYPASS_COPY_FAILED: return "Copy failed";
         case EQ_BYPASS_UNSUPPORTED_FORMAT: return "Unsupported";
         case EQ_BYPASS_AUDIO_BUSY: return "Audio busy";
+        case EQ_BYPASS_NO_ROUTE_PROFILE: return "No PEQ for this output";
         default: return "Bypassed";
     }
 }
@@ -593,6 +701,7 @@ static const char *headroom_mode_str(uint8_t mode)
     switch (mode) {
         case EQ_HEADROOM_LOUD: return "Loud";
         case EQ_HEADROOM_RAW: return "Direct";
+        case EQ_HEADROOM_EXACT: return "APO Exact";
         case EQ_HEADROOM_SAFE:
         default: return "Safe";
     }
@@ -630,7 +739,35 @@ static const char *diag_port_type_str(uint8_t type)
 
 static const char *eq_target_str(void)
 {
+    if (g_route_profiles.enabled_mask != 0) {
+        return "Output PEQs";
+    }
     return g_control.speaker_only ? "Vita speakers" : "All outputs";
+}
+
+static int route_profile_count(void)
+{
+    int count = 0;
+    for (uint8_t route = EQ_ROUTE_SPEAKER; route <= EQ_ROUTE_BLUETOOTH; ++route) {
+        if (eq_route_profile_bank_has_route(&g_route_profiles, route)) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static int route_profile_edit_index(void)
+{
+    return eq_route_profile_index(g_route_profile_edit_route);
+}
+
+static const char *route_profile_source(uint8_t route)
+{
+    int index = eq_route_profile_index(route);
+    if (index < 0 || !eq_route_profile_bank_has_route(&g_route_profiles, route)) {
+        return "Not assigned";
+    }
+    return g_route_profile_sources[index][0] ? g_route_profile_sources[index] : "Assigned PEQ";
 }
 
 static const char *button_name(int button)
@@ -656,6 +793,8 @@ static int save_boot_state(void);
 static void change_screen(app_screen_t screen);
 static void open_music_browser_roots(void);
 static void open_music_browser_path(const char *path);
+static void open_peq_browser_root(void);
+static void open_apo_browser_path(const char *path);
 
 static void set_message(const char *fmt, ...)
 {
@@ -717,10 +856,13 @@ static eq_route_t detect_route_user(void)
         }
     }
 
-    SceCtrlData data;
-    memset(&data, 0, sizeof(data));
-    if (sceCtrlPeekBufferPositive(0, &data, 1) >= 0 && (data.buttons & SCE_CTRL_HEADPHONE)) {
-        return EQ_ROUTE_HEADPHONES;
+    {
+        SceCtrlData data;
+        memset(&data, 0, sizeof(data));
+        if (sceCtrlPeekBufferPositive(0, &data, 1) >= 0 &&
+            (data.buttons & SCE_CTRL_HEADPHONE)) {
+            return EQ_ROUTE_HEADPHONES;
+        }
     }
 
     return EQ_ROUTE_UNKNOWN;
@@ -1008,8 +1150,11 @@ static void poll_plugin_status(void)
 static int apply_control_candidate(const eq_control_t *candidate, int mark_boot_dirty_on_success)
 {
     int set_res;
+    int profile_res;
     int status_res;
     eq_control_t next;
+    eq_route_profile_bank_t next_profiles;
+    char next_profile_sources[EQ_ROUTE_PROFILE_COUNT][EQ_ROUTE_PROFILE_SOURCE_NAME_MAX];
 
     if (!g_plugin_compatible) {
         set_message("Plugin version mismatch");
@@ -1022,18 +1167,52 @@ static int apply_control_candidate(const eq_control_t *candidate, int mark_boot_
     next = *candidate;
     next.route_hint = (uint8_t)detect_route_user();
     next.dirty_counter = eq_control_next_dirty_counter(g_control.dirty_counter);
+    next_profiles = g_route_profiles;
+    memcpy(next_profile_sources, g_route_profile_sources, sizeof(next_profile_sources));
+
+    if (mark_boot_dirty_on_success &&
+        eq_route_profile_bank_has_route(&next_profiles, g_route_profile_edit_route)) {
+        if (eqvita_app_state_prepare_route_profile_candidate(
+                &g_route_profiles, g_route_profile_sources,
+                g_route_profile_edit_route, &next,
+                &next_profiles, next_profile_sources) < 0) {
+            set_message("Output PEQ state is invalid");
+            return -1;
+        }
+    }
+    if (eq_route_profile_bank_validate(&next_profiles) < 0) {
+        set_message("Output PEQ state is invalid");
+        return -1;
+    }
 
     set_res = EqSetControl(&next);
-    status_res = (set_res >= 0) ? EqGetStatus(&g_status) : -1;
     if (set_res < 0) {
         set_message("Plugin communication failed (%d)", set_res);
         return set_res;
     }
+    profile_res = EqSetRouteProfiles(&next_profiles);
+    if (profile_res < 0) {
+        (void)EqSetControl(&g_control);
+        set_message("Output PEQ sync failed (%d)", profile_res);
+        return profile_res;
+    }
+    status_res = EqGetStatus(&g_status);
 
     g_control = next;
+    g_route_profiles = next_profiles;
+    memcpy(g_route_profile_sources, next_profile_sources, sizeof(g_route_profile_sources));
     if (mark_boot_dirty_on_success) {
         mark_boot_state_dirty();
         eqvita_app_state_mark_current_preset_dirty(&g_app_state);
+        {
+            int save_res = eqvita_save_route_profiles(EQVITA_DATA_DIR,
+                                                       &g_route_profiles,
+                                                       g_route_profile_sources);
+            g_route_profiles_save_failed = save_res < 0;
+            if (save_res < 0) {
+                app_log("output-peq: save-failed error=%d", save_res);
+            }
+        }
     }
     note_status_result(status_res);
     return 0;
@@ -1075,6 +1254,10 @@ static void toggle_enabled(void)
 static void toggle_speaker_only(void)
 {
     eq_control_t next = g_control;
+    if (g_route_profiles.enabled_mask != 0) {
+        set_message("Output PEQs choose the route automatically");
+        return;
+    }
     next.speaker_only = !next.speaker_only;
     apply_control_candidate(&next, 1);
 }
@@ -1082,6 +1265,10 @@ static void toggle_speaker_only(void)
 static void toggle_hpf(void)
 {
     eq_control_t next = g_control;
+    if (next.eq_mode == EQ_MODE_PARAMETRIC) {
+        set_message("Bass guard is off while PEQ is active");
+        return;
+    }
     eq_control_set_hpf_enabled(&next, !eq_control_hpf_enabled(&next));
     apply_control_candidate(&next, 1);
 }
@@ -1090,8 +1277,12 @@ static void adjust_headroom_mode(int delta)
 {
     eq_control_t next = g_control;
     int mode = (int)eq_control_get_headroom_mode(&next) + delta;
-    if (mode < 0) mode = EQ_HEADROOM_RAW;
-    if (mode > EQ_HEADROOM_RAW) mode = EQ_HEADROOM_SAFE;
+    if (next.eq_mode == EQ_MODE_PARAMETRIC) {
+        set_message("APO Exact is locked while PEQ is active");
+        return;
+    }
+    if (mode < 0) mode = EQ_HEADROOM_EXACT;
+    if (mode > EQ_HEADROOM_EXACT) mode = EQ_HEADROOM_SAFE;
     eq_control_set_headroom_mode(&next, (uint8_t)mode);
     apply_control_candidate(&next, 1);
 }
@@ -1100,7 +1291,7 @@ static void adjust_preamp(int delta)
 {
     eq_control_t next = g_control;
     int v = next.preamp_mdB + delta;
-    next.preamp_mdB = clamp(v, -EQ_MAX_ABS_GAIN_MDB, EQ_MAX_ABS_GAIN_MDB);
+    next.preamp_mdB = clamp(v, EQ_PREAMP_MIN_MDB, EQ_PREAMP_MAX_MDB);
     apply_control_candidate(&next, 1);
 }
 
@@ -1116,6 +1307,27 @@ static void adjust_band(int idx, int delta)
     apply_control_candidate(&next, 1);
 }
 
+static void adjust_parametric_operation(int idx, int delta)
+{
+    eq_control_t next = g_control;
+    eq_parametric_filter_t *filter;
+    int gain;
+
+    if (next.eq_mode != EQ_MODE_PARAMETRIC ||
+        idx < 0 || idx >= next.parametric_filter_count) {
+        return;
+    }
+    filter = &next.parametric_filters[idx];
+    if (filter->type < EQ_FILTER_PEAK || filter->type > EQ_FILTER_HIGH_SHELF) {
+        return;
+    }
+    gain = filter->data.filter.gain_mdB + delta;
+    filter->data.filter.gain_mdB = clamp(gain,
+                                         -EQ_PARAMETRIC_MAX_ABS_GAIN_MDB,
+                                         EQ_PARAMETRIC_MAX_ABS_GAIN_MDB);
+    apply_control_candidate(&next, 1);
+}
+
 static int save_preset(void)
 {
     return eqvita_save_preset(EQVITA_DATA_DIR, g_preset_slot, &g_control);
@@ -1125,16 +1337,21 @@ static int save_boot_state(void)
 {
     eq_control_t boot_control = g_control;
     int res;
+    int profiles_res;
 
     boot_control.route_hint = (uint8_t)detect_route_user();
     res = eqvita_save_boot_state(EQVITA_DATA_DIR, &boot_control);
-    if (res >= 0) {
+    profiles_res = eqvita_save_route_profiles(EQVITA_DATA_DIR,
+                                               &g_route_profiles,
+                                               g_route_profile_sources);
+    g_route_profiles_save_failed = profiles_res < 0;
+    if (res >= 0 && profiles_res >= 0) {
         eqvita_app_state_mark_boot_saved(&g_app_state);
         g_boot_state_save_failed = 0;
     } else {
         g_boot_state_save_failed = 1;
     }
-    return res;
+    return res < 0 ? res : profiles_res;
 }
 
 static int persist_active_preset_state(const char *reason, int *out_slot_res, int *out_boot_res)
@@ -1277,14 +1494,157 @@ static void load_preset_with_message(void)
     }
 }
 
+static int select_route_profile_target(uint8_t route, int load_for_edit)
+{
+    int index = eq_route_profile_index(route);
+    uint8_t previous_edit_route = g_route_profile_edit_route;
+    uint8_t previous_selected_route = g_route_profiles.selected_route;
+
+    if (index < 0) {
+        route = EQ_ROUTE_SPEAKER;
+        index = 0;
+    }
+    g_route_profile_edit_route = route;
+    g_route_profiles.selected_route = route;
+
+    if (load_for_edit && eq_route_profile_bank_has_route(&g_route_profiles, route)) {
+        eq_control_t next = g_route_profiles.profiles[index];
+        next.enabled = g_control.enabled;
+        next.route_hint = (uint8_t)detect_route_user();
+        if (apply_control_candidate(&next, 0) == 0) {
+            g_eq_entry_control = g_control;
+            g_eq_entry_valid = 1;
+        } else {
+            g_route_profile_edit_route = previous_edit_route;
+            g_route_profiles.selected_route = previous_selected_route;
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static void adjust_route_profile_target(int delta)
+{
+    int index = route_profile_edit_index();
+    int next_index;
+
+    if (index < 0) {
+        index = 0;
+    }
+    next_index = (index + (delta >= 0 ? 1 : -1) + (int)EQ_ROUTE_PROFILE_COUNT) %
+        (int)EQ_ROUTE_PROFILE_COUNT;
+    if (select_route_profile_target((uint8_t)(EQ_ROUTE_SPEAKER + next_index), 1) == 0) {
+        int save_res = eqvita_save_route_profiles(EQVITA_DATA_DIR,
+                                                   &g_route_profiles,
+                                                   g_route_profile_sources);
+        g_route_profiles_save_failed = save_res < 0;
+        if (save_res < 0) {
+            set_message("Output selection save failed (%d)", save_res);
+        }
+    }
+}
+
+static void open_output_peq_screen(app_screen_t return_screen)
+{
+    uint8_t live_route = g_status.route != EQ_ROUTE_UNKNOWN ?
+        g_status.route : (uint8_t)detect_route_user();
+    uint8_t target = g_route_profiles.selected_route;
+
+    if (eq_route_profile_index(live_route) >= 0) {
+        target = live_route;
+    }
+    if (eq_route_profile_index(target) < 0) {
+        target = EQ_ROUTE_SPEAKER;
+    }
+    g_output_peq_return_screen = return_screen;
+    select_route_profile_target(target, 1);
+    change_screen(SCREEN_OUTPUT_PEQ);
+}
+
+static void clear_route_profile(void)
+{
+    int index = route_profile_edit_index();
+    eq_control_t next = g_control;
+    eq_control_t previous_profile;
+    uint8_t previous_enabled_mask;
+    uint8_t previous_selected_route;
+    uint32_t previous_dirty_counter;
+    char previous_source[EQ_ROUTE_PROFILE_SOURCE_NAME_MAX];
+
+    if (index < 0 || !eq_route_profile_bank_has_route(&g_route_profiles,
+                                                       g_route_profile_edit_route)) {
+        set_message("No PEQ is assigned to this output");
+        return;
+    }
+
+    previous_profile = g_route_profiles.profiles[index];
+    previous_enabled_mask = g_route_profiles.enabled_mask;
+    previous_selected_route = g_route_profiles.selected_route;
+    previous_dirty_counter = g_route_profiles.dirty_counter;
+    memcpy(previous_source, g_route_profile_sources[index], sizeof(previous_source));
+
+    g_route_profiles.enabled_mask &= (uint8_t)~eq_route_profile_bit(g_route_profile_edit_route);
+    eq_control_init_defaults(&g_route_profiles.profiles[index]);
+    g_route_profiles.profiles[index].enabled = 1;
+    g_route_profiles.profiles[index].speaker_only = 0;
+    g_route_profile_sources[index][0] = '\0';
+    eq_route_profile_bank_touch(&g_route_profiles);
+
+    if (g_route_profiles.enabled_mask == 0) {
+        eq_control_init_defaults(&next);
+    }
+    if (apply_control_candidate(&next, 1) < 0) {
+        g_route_profiles.profiles[index] = previous_profile;
+        g_route_profiles.enabled_mask = previous_enabled_mask;
+        g_route_profiles.selected_route = previous_selected_route;
+        g_route_profiles.dirty_counter = previous_dirty_counter;
+        memcpy(g_route_profile_sources[index], previous_source, sizeof(previous_source));
+        return;
+    }
+    (void)save_boot_state();
+    set_message("Cleared %s PEQ", route_str(g_route_profile_edit_route));
+    app_log("output-peq: cleared route=%s remaining=%d",
+            route_str(g_route_profile_edit_route), route_profile_count());
+}
+
 static void open_music_browser_roots(void)
 {
-    browser_async_start(NULL, 1);
+    g_browser_purpose = BROWSER_PURPOSE_MUSIC;
+    browser_async_start(NULL, 1, EQVITA_MEDIA_FILTER_AUDIO, NULL);
 }
 
 static void open_music_browser_path(const char *path)
 {
-    browser_async_start(path, 0);
+    g_browser_purpose = BROWSER_PURPOSE_MUSIC;
+    browser_async_start(path, 0, EQVITA_MEDIA_FILTER_AUDIO, NULL);
+}
+
+static void open_peq_browser_root(void)
+{
+    int result = prepare_peq_library();
+
+    if (result < 0) {
+        set_message("Could not create %s", EQVITA_PEQ_DIR);
+        app_log("peq-library: create-failed path=%s error=%d", EQVITA_PEQ_DIR, result);
+        return;
+    }
+    g_browser_purpose = BROWSER_PURPOSE_EQUALIZER_APO;
+    browser_async_start(EQVITA_PEQ_DIR, 0,
+                        EQVITA_MEDIA_FILTER_EQUALIZER_APO,
+                        EQVITA_PEQ_DIR);
+}
+
+static void open_apo_browser_path(const char *path)
+{
+    if (!eqvita_media_browser_path_is_within(path, EQVITA_PEQ_DIR)) {
+        set_message("PEQ browser is limited to %s", EQVITA_PEQ_DIR);
+        change_screen(g_peq_browser_return_screen);
+        return;
+    }
+    g_browser_purpose = BROWSER_PURPOSE_EQUALIZER_APO;
+    browser_async_start(path, 0,
+                        EQVITA_MEDIA_FILTER_EQUALIZER_APO,
+                        EQVITA_PEQ_DIR);
 }
 
 static void leave_music_browser(void)
@@ -1292,6 +1652,21 @@ static void leave_music_browser(void)
     char parent[EQVITA_MEDIA_MAX_PATH];
 
     browser_async_cancel();
+
+    if (g_browser_purpose == BROWSER_PURPOSE_EQUALIZER_APO) {
+        if (!g_media_listing.path[0] ||
+            eqvita_media_browser_paths_equal(g_media_listing.path, EQVITA_PEQ_DIR)) {
+            change_screen(g_peq_browser_return_screen);
+            return;
+        }
+        if (eqvita_media_browser_parent_path(parent, sizeof(parent), g_media_listing.path) == 0 &&
+            eqvita_media_browser_path_is_within(parent, EQVITA_PEQ_DIR)) {
+            open_apo_browser_path(parent);
+            return;
+        }
+        change_screen(g_peq_browser_return_screen);
+        return;
+    }
 
     if (g_media_listing.path[0] &&
         eqvita_media_browser_parent_path(parent, sizeof(parent), g_media_listing.path) == 0) {
@@ -1304,6 +1679,90 @@ static void leave_music_browser(void)
     }
 
     change_screen(SCREEN_MUSIC);
+}
+
+static void import_equalizer_apo_file(const char *path)
+{
+    eq_control_t base;
+    eq_control_t imported;
+    eq_control_t previous_profile;
+    eqvita_apo_import_result_t result;
+    int profile_index = route_profile_edit_index();
+    const char *source_name = path;
+    size_t peq_root_length = strlen(EQVITA_PEQ_DIR);
+    uint8_t previous_enabled_mask;
+    uint8_t previous_selected_route;
+    uint32_t previous_dirty_counter;
+    char previous_source[EQ_ROUTE_PROFILE_SOURCE_NAME_MAX];
+
+    if (profile_index < 0) {
+        set_message("Choose an output before selecting PEQ");
+        return;
+    }
+
+    if (eq_route_profile_bank_has_route(&g_route_profiles, g_route_profile_edit_route)) {
+        base = g_route_profiles.profiles[profile_index];
+    } else {
+        eq_control_init_defaults(&base);
+    }
+    base.enabled = 1;
+    base.speaker_only = 0;
+    base.route_hint = EQ_ROUTE_UNKNOWN;
+
+    memset(&result, 0, sizeof(result));
+    if (eqvita_apo_import_file(path, &g_apo_import_policy, &base, &imported, &result) < 0) {
+        const char *error_file = eqvita_media_browser_file_name(
+            result.error_path[0] ? result.error_path : path);
+        if (result.error_line > 0) {
+            set_message("%s:%d: %s", error_file, result.error_line, result.message);
+        } else {
+            set_message("%s: %s", error_file,
+                        result.message[0] ? result.message : "invalid config");
+        }
+        app_log("apo-import: failed file=%s line=%d error=%s",
+                path ? path : "", result.error_line, result.message);
+        return;
+    }
+
+    imported.enabled = 1;
+    imported.speaker_only = 0;
+    imported.route_hint = EQ_ROUTE_UNKNOWN;
+
+    previous_profile = g_route_profiles.profiles[profile_index];
+    previous_enabled_mask = g_route_profiles.enabled_mask;
+    previous_selected_route = g_route_profiles.selected_route;
+    previous_dirty_counter = g_route_profiles.dirty_counter;
+    memcpy(previous_source, g_route_profile_sources[profile_index], sizeof(previous_source));
+
+    g_route_profiles.enabled_mask |= eq_route_profile_bit(g_route_profile_edit_route);
+    g_route_profiles.selected_route = g_route_profile_edit_route;
+    g_route_profiles.profiles[profile_index] = imported;
+    eq_route_profile_bank_touch(&g_route_profiles);
+    if (path && strncmp(path, EQVITA_PEQ_DIR, peq_root_length) == 0 &&
+        (path[peq_root_length] == '/' || path[peq_root_length] == '\\')) {
+        source_name = path + peq_root_length + 1;
+    }
+    snprintf(g_route_profile_sources[profile_index],
+             sizeof(g_route_profile_sources[profile_index]),
+             "%.*s", (int)sizeof(g_route_profile_sources[profile_index]) - 1,
+             source_name ? source_name : "PEQ config");
+
+    if (apply_control_candidate(&imported, 1) < 0) {
+        g_route_profiles.profiles[profile_index] = previous_profile;
+        g_route_profiles.enabled_mask = previous_enabled_mask;
+        g_route_profiles.selected_route = previous_selected_route;
+        g_route_profiles.dirty_counter = previous_dirty_counter;
+        memcpy(g_route_profile_sources[profile_index], previous_source, sizeof(previous_source));
+        return;
+    }
+    (void)save_boot_state();
+    set_message("%s PEQ: %d filters, %d Copy ops",
+                route_str(g_route_profile_edit_route), result.filter_count, result.copy_count);
+    app_log("apo-import: ok route=%s file=%s filters=%d copy=%d preamps=%d includes=%d ignored=%d exclusive=1",
+            route_str(g_route_profile_edit_route), path ? path : "",
+            result.filter_count, result.copy_count,
+            result.preamp_count, result.include_count, result.ignored_count);
+    change_screen(SCREEN_OUTPUT_PEQ);
 }
 
 static void media_player_play_selected(const char *path)
@@ -1395,6 +1854,7 @@ static int eq_entry_changed(void)
 static int should_prompt_before_leaving_eq(void)
 {
     return is_eq_edit_screen(g_screen) &&
+        g_route_profiles.enabled_mask == 0 &&
         eqvita_app_state_current_preset_dirty(&g_app_state) &&
         eq_entry_changed();
 }
@@ -1407,14 +1867,21 @@ static void close_exit_prompt(void)
 
 static void request_leave_current_screen(void)
 {
+    app_screen_t return_screen = SCREEN_HOME;
+
     if (should_prompt_before_leaving_eq()) {
         g_exit_prompt_active = 1;
         g_exit_prompt_selected = 0;
         g_message_frames = 0;
         return;
     }
+    if (g_screen == SCREEN_OUTPUT_PEQ) {
+        return_screen = g_output_peq_return_screen;
+    } else if (is_eq_edit_screen(g_screen)) {
+        return_screen = g_eq_return_screen;
+    }
     close_exit_prompt();
-    change_screen(SCREEN_HOME);
+    change_screen(return_screen);
 }
 
 static void discard_eq_edits_and_leave(void)
@@ -1450,6 +1917,7 @@ static void activate_exit_prompt(void)
 static void reset_defaults(void)
 {
     eq_control_t next = g_control;
+    eq_control_set_graphic_mode(&next);
     eq_control_set_headroom_mode(&next, EQ_HEADROOM_SAFE);
     next.preamp_mdB = EQ_DEFAULT_PREAMP_MDB;
     for (int i = 0; i < EQ_BANDS; ++i) {
@@ -1461,6 +1929,8 @@ static void reset_defaults(void)
 static void apply_simple_eq(int bass, int mid, int treble, int auto_preamp)
 {
     eq_control_t next = g_control;
+
+    eq_control_set_graphic_mode(&next);
 
     bass = clamp(bass, -EQ_MAX_ABS_GAIN_MDB, EQ_MAX_ABS_GAIN_MDB);
     mid = clamp(mid, -EQ_MAX_ABS_GAIN_MDB, EQ_MAX_ABS_GAIN_MDB);
@@ -1485,6 +1955,7 @@ static void apply_simple_eq(int bass, int mid, int treble, int auto_preamp)
 static void apply_preset_stock_depth(void)
 {
     eq_control_t next = g_control;
+    eq_control_set_graphic_mode(&next);
     eq_control_set_headroom_mode(&next, EQ_HEADROOM_SAFE);
     next.preamp_mdB = -4000;
     next.band_gain_mdB[0] = 0;
@@ -1518,6 +1989,7 @@ static void apply_preset_mod_switch(void)
     };
 
     eq_control_t next = g_control;
+    eq_control_set_graphic_mode(&next);
     next.enabled = 1;
     next.speaker_only = 1;
     eq_control_set_hpf_enabled(&next, 0);
@@ -1555,10 +2027,13 @@ static const char *screen_title(app_screen_t screen)
     switch (screen) {
         case SCREEN_STATUS: return "Telemetry";
         case SCREEN_PRESETS: return "Presets";
+        case SCREEN_OUTPUT_PEQ: return "Parametric EQ";
         case SCREEN_SIMPLE: return "Simple EQ";
         case SCREEN_ADVANCED: return "Advanced EQ";
         case SCREEN_MUSIC: return "Music Preview";
-        case SCREEN_MUSIC_BROWSER: return "Choose Music";
+        case SCREEN_MUSIC_BROWSER:
+            return g_browser_purpose == BROWSER_PURPOSE_EQUALIZER_APO ?
+                "Select PEQ Config" : "Choose Music";
         case SCREEN_THEMES: return "Themes";
         case SCREEN_SETTINGS: return "Settings";
         case SCREEN_ABOUT: return "Help";
@@ -1572,11 +2047,24 @@ static const char *screen_subtitle(app_screen_t screen)
     switch (screen) {
         case SCREEN_STATUS: return "Live output and app status";
         case SCREEN_PRESETS: return "Choose or save sound profiles";
+        case SCREEN_OUTPUT_PEQ: return "Separate PEQ for each audio output";
         case SCREEN_SIMPLE: return "Adjust bass, mids, treble";
-        case SCREEN_ADVANCED: return "Preamp and 10 bands";
+        case SCREEN_ADVANCED:
+            if (g_route_profiles.enabled_mask != 0 &&
+                eq_route_profile_bank_has_route(&g_route_profiles, g_route_profile_edit_route)) {
+                static char advanced_subtitle[96];
+                snprintf(advanced_subtitle, sizeof(advanced_subtitle), "%s - %s",
+                         route_str(g_route_profile_edit_route),
+                         g_control.eq_mode == EQ_MODE_PARAMETRIC ? "Equalizer APO operations" : "10-band EQ");
+                return advanced_subtitle;
+            }
+            return g_control.eq_mode == EQ_MODE_PARAMETRIC ?
+                "Ordered Equalizer APO operations" : "Preamp and 10 bands";
         case SCREEN_MUSIC: return "Play a song while tuning EQ";
         case SCREEN_MUSIC_BROWSER:
             return browser_async_is_loading() ? "Loading folder..." :
+                g_browser_purpose == BROWSER_PURPOSE_EQUALIZER_APO ?
+                    EQVITA_PEQ_DIR :
                 g_media_listing.path[0] ? g_media_listing.path : "Choose a folder";
         case SCREEN_THEMES: return "Choose the app color style";
         case SCREEN_SETTINGS: return "Choose where EQ applies";
@@ -1589,14 +2077,15 @@ static const char *screen_subtitle(app_screen_t screen)
 static app_screen_t home_screen_for_row(int row)
 {
     switch (row) {
-        case 1: return SCREEN_SIMPLE;
-        case 2: return SCREEN_ADVANCED;
-        case 3: return SCREEN_PRESETS;
-        case 4: return SCREEN_MUSIC;
-        case 5: return SCREEN_THEMES;
-        case 6: return SCREEN_SETTINGS;
-        case 7: return SCREEN_STATUS;
-        case 8: return SCREEN_ABOUT;
+        case HOME_ROW_SIMPLE: return SCREEN_SIMPLE;
+        case HOME_ROW_ADVANCED: return SCREEN_ADVANCED;
+        case HOME_ROW_PARAMETRIC: return SCREEN_OUTPUT_PEQ;
+        case HOME_ROW_PRESETS: return SCREEN_PRESETS;
+        case HOME_ROW_MUSIC: return SCREEN_MUSIC;
+        case HOME_ROW_THEMES: return SCREEN_THEMES;
+        case HOME_ROW_SETTINGS: return SCREEN_SETTINGS;
+        case HOME_ROW_STATUS: return SCREEN_STATUS;
+        case HOME_ROW_ABOUT: return SCREEN_ABOUT;
         default: return SCREEN_HOME;
     }
 }
@@ -1604,9 +2093,10 @@ static app_screen_t home_screen_for_row(int row)
 static int current_row_count(void)
 {
     switch (g_screen) {
-        case SCREEN_HOME: return 9;
+        case SCREEN_HOME: return HOME_ROW_COUNT;
         case SCREEN_STATUS: return STATUS_ROW_COUNT;
         case SCREEN_PRESETS: return PRESETS_ROW_COUNT;
+        case SCREEN_OUTPUT_PEQ: return OUTPUT_PEQ_ROW_COUNT;
         case SCREEN_SIMPLE: return SIMPLE_ROW_COUNT;
         case SCREEN_ADVANCED: return ADVANCED_ROW_COUNT;
         case SCREEN_MUSIC: return MUSIC_ROW_COUNT;
@@ -1626,6 +2116,8 @@ static int row_is_section(app_screen_t screen, int row)
                    row == STATUS_ROW_PROCESSING_SECTION;
         case SCREEN_PRESETS:
             return row == PRESETS_ROW_ACTIONS_SECTION;
+        case SCREEN_OUTPUT_PEQ:
+            return row == OUTPUT_PEQ_ROW_INFO_SECTION;
         case SCREEN_SIMPLE:
             return row == SIMPLE_ROW_PRESET_SECTION;
         case SCREEN_ADVANCED:
@@ -1733,10 +2225,17 @@ static void row_value(char *value, size_t value_size, app_screen_t screen, int r
     value[0] = 0;
     switch (screen) {
         case SCREEN_HOME:
-            if (row == 0) snprintf(value, value_size, "%s", g_control.enabled ? "On" : "Off");
-            else if (row == 3) snprintf(value, value_size, "Slot %d", g_preset_slot + 1);
-            else if (row == 4) snprintf(value, value_size, "%s", eqvita_media_player_state_label(g_media_status.state));
-            else if (row == 5) snprintf(value, value_size, "%s", eq_ui_theme_name(eq_ui_theme_index()));
+            if (row == HOME_ROW_ENABLED) {
+                snprintf(value, value_size, "%s", g_control.enabled ? "On" : "Off");
+            } else if (row == HOME_ROW_PARAMETRIC) {
+                snprintf(value, value_size, "%d of 3", route_profile_count());
+            } else if (row == HOME_ROW_PRESETS) {
+                snprintf(value, value_size, "Slot %d", g_preset_slot + 1);
+            } else if (row == HOME_ROW_MUSIC) {
+                snprintf(value, value_size, "%s", eqvita_media_player_state_label(g_media_status.state));
+            } else if (row == HOME_ROW_THEMES) {
+                snprintf(value, value_size, "%s", eq_ui_theme_name(eq_ui_theme_index()));
+            }
             break;
         case SCREEN_STATUS:
             if (row == STATUS_ROW_EQ_STATUS) snprintf(value, value_size, "%s", g_control.enabled ? (g_status.eq_active ? "Active" : bypass_reason_str(g_status.bypass_reason)) : "Off");
@@ -1762,6 +2261,27 @@ static void row_value(char *value, size_t value_size, app_screen_t screen, int r
         case SCREEN_PRESETS:
             if (row == PRESETS_ROW_SLOT) snprintf(value, value_size, "Slot %d", g_preset_slot + 1);
             break;
+        case SCREEN_OUTPUT_PEQ:
+            if (row == OUTPUT_PEQ_ROW_TARGET) {
+                snprintf(value, value_size, "%s", route_str(g_route_profile_edit_route));
+            } else if (row == OUTPUT_PEQ_ROW_ASSIGNED) {
+                snprintf(value, value_size, "%s", route_profile_source(g_route_profile_edit_route));
+            } else if (row == OUTPUT_PEQ_ROW_CHOOSE) {
+                snprintf(value, value_size, "Select .txt");
+            } else if (row == OUTPUT_PEQ_ROW_INSPECT) {
+                snprintf(value, value_size, "Advanced EQ");
+            } else if (row == OUTPUT_PEQ_ROW_CLEAR) {
+                snprintf(value, value_size, "%s",
+                         eq_route_profile_bank_has_route(&g_route_profiles, g_route_profile_edit_route) ?
+                             "Clear" : "Not assigned");
+            } else if (row == OUTPUT_PEQ_ROW_LIVE) {
+                snprintf(value, value_size, "%s",
+                         route_str(g_status.route != EQ_ROUTE_UNKNOWN ?
+                                   g_status.route : (uint8_t)detect_route_user()));
+            } else if (row == OUTPUT_PEQ_ROW_SWITCHING) {
+                snprintf(value, value_size, "%d of 3 assigned", route_profile_count());
+            }
+            break;
         case SCREEN_SIMPLE:
             if (row == SIMPLE_ROW_PREAMP) format_db(value, value_size, g_control.preamp_mdB);
             else if (row == SIMPLE_ROW_BASS) format_db(value, value_size, g_control.band_gain_mdB[1]);
@@ -1773,8 +2293,18 @@ static void row_value(char *value, size_t value_size, app_screen_t screen, int r
         case SCREEN_ADVANCED:
             if (row == ADV_ROW_PREAMP) {
                 format_db(value, value_size, g_control.preamp_mdB);
-            } else if (row >= ADV_BAND_ROW_BASE && row < ADV_BAND_ROW_BASE + EQ_BANDS) {
-                format_db(value, value_size, g_control.band_gain_mdB[row - ADV_BAND_ROW_BASE]);
+            } else if (advanced_row_is_eq_value(row)) {
+                int index = row - ADV_BAND_ROW_BASE;
+                if (g_control.eq_mode == EQ_MODE_PARAMETRIC) {
+                    const eq_parametric_filter_t *operation = &g_control.parametric_filters[index];
+                    if (operation->type == EQ_FILTER_COPY) {
+                        snprintf(value, value_size, "Matrix");
+                    } else {
+                        format_db(value, value_size, operation->data.filter.gain_mdB);
+                    }
+                } else {
+                    format_db(value, value_size, g_control.band_gain_mdB[index]);
+                }
             } else if (row == ADV_ROW_PRESET_SLOT) {
                 snprintf(value, value_size, "Slot %d", g_preset_slot + 1);
             } else if (row == ADV_ROW_SAVE_NEXT) {
@@ -1796,7 +2326,8 @@ static void row_value(char *value, size_t value_size, app_screen_t screen, int r
             } else if (row >= 0 && row < g_media_listing.count) {
                 eqvita_media_entry_t *entry = &g_media_listing.entries[row];
                 snprintf(value, value_size, "%s",
-                         entry->kind == EQVITA_MEDIA_ENTRY_FILE ? "Play" :
+                         entry->kind == EQVITA_MEDIA_ENTRY_FILE ?
+                             (g_browser_purpose == BROWSER_PURPOSE_EQUALIZER_APO ? "Import" : "Play") :
                          entry->kind == EQVITA_MEDIA_ENTRY_PARENT ? "Back" : "Open");
             }
             break;
@@ -1806,12 +2337,16 @@ static void row_value(char *value, size_t value_size, app_screen_t screen, int r
         case SCREEN_SETTINGS:
             if (row == SETTINGS_ROW_ENABLED) snprintf(value, value_size, "%s", g_control.enabled ? "On" : "Off");
             else if (row == SETTINGS_ROW_SCOPE) snprintf(value, value_size, "%s", eq_target_str());
-            else if (row == SETTINGS_ROW_HPF) snprintf(value, value_size, "%s", eq_control_hpf_enabled(&g_control) ? "On" : "Off");
-            else if (row == SETTINGS_ROW_HEADROOM) snprintf(value, value_size, "%s", headroom_mode_str(eq_control_get_headroom_mode(&g_control)));
+            else if (row == SETTINGS_ROW_HPF) snprintf(value, value_size, "%s",
+                g_control.eq_mode == EQ_MODE_PARAMETRIC ? "Off (PEQ)" :
+                eq_control_hpf_enabled(&g_control) ? "On" : "Off");
+            else if (row == SETTINGS_ROW_HEADROOM) snprintf(value, value_size, "%s",
+                g_control.eq_mode == EQ_MODE_PARAMETRIC ? "APO Exact (PEQ)" :
+                headroom_mode_str(eq_control_get_headroom_mode(&g_control)));
             else if (row == SETTINGS_ROW_ROUTE) snprintf(value, value_size, "%s",
                 route_str(g_status.route != EQ_ROUTE_UNKNOWN ? g_status.route : g_control.route_hint));
             else if (row == SETTINGS_ROW_STARTUP) snprintf(value, value_size, "%s",
-                g_boot_state_save_failed ? "Save failed" :
+                (g_boot_state_save_failed || g_route_profiles_save_failed) ? "Save failed" :
                 eqvita_app_state_boot_dirty(&g_app_state) ? "Unsaved" : "Saved");
             break;
         case SCREEN_ABOUT:
@@ -1838,12 +2373,13 @@ static void row_text(app_screen_t screen,
 
     switch (screen) {
         case SCREEN_HOME: {
-            static const char *icons[] = {"power", "simple", "advanced", "preset", "music", "themes", "settings", "status", "about"};
-            static const char *labels[] = {"Equalizer", "Simple EQ", "Advanced EQ", "Presets", "Music Preview", "Themes", "Settings", "Telemetry", "Help"};
+            static const char *icons[] = {"power", "simple", "advanced", "advanced", "preset", "music", "themes", "settings", "status", "about"};
+            static const char *labels[] = {"Equalizer", "Simple EQ", "Advanced EQ", "Parametric EQ", "Presets", "Music Preview", "Themes", "Settings", "Telemetry", "Help"};
             static const char *descs[] = {
                 "Turn sound tuning on or off",
                 "Adjust bass, mids, treble",
-                "Fine tune every band",
+                "Fine tune the 10-band equalizer",
+                "Import APO .txt profiles for each output",
                 "Choose or save profiles",
                 "Play a song while tuning EQ",
                 "Choose the app color style",
@@ -1852,7 +2388,7 @@ static void row_text(app_screen_t screen,
                 "Controls and short guide"
             };
             *icon = icons[row]; *label = labels[row]; *desc = descs[row];
-            *kind = row == 0 ? EQ_UI_ROW_ACTION : EQ_UI_ROW_NAV;
+            *kind = row == HOME_ROW_ENABLED ? EQ_UI_ROW_ACTION : EQ_UI_ROW_NAV;
             break;
         }
         case SCREEN_STATUS:
@@ -1921,6 +2457,11 @@ static void row_text(app_screen_t screen,
                 *label = "Preset: MOD Switch";
                 *desc = "For Switch speaker mod";
                 *kind = EQ_UI_ROW_ACTION;
+            } else if (row == PRESETS_ROW_OUTPUT_PEQ) {
+                *icon = "load";
+                *label = "Parametric EQ";
+                *desc = "Separate speaker, wired, and Bluetooth EQ";
+                *kind = EQ_UI_ROW_NAV;
             } else if (row == PRESETS_ROW_SAVE) {
                 *icon = "save";
                 *label = "Save current preset";
@@ -1936,6 +2477,45 @@ static void row_text(app_screen_t screen,
                 *label = "Reset EQ";
                 *desc = "Clears all EQ gains";
                 *kind = EQ_UI_ROW_ACTION;
+            }
+            break;
+        case SCREEN_OUTPUT_PEQ:
+            if (row == OUTPUT_PEQ_ROW_TARGET) {
+                *icon = "route";
+                *label = "Configure output";
+                *desc = "Left/right selects speakers, wired, or Bluetooth";
+                *kind = EQ_UI_ROW_ADJUST;
+            } else if (row == OUTPUT_PEQ_ROW_ASSIGNED) {
+                *icon = "file";
+                *label = "Assigned PEQ";
+                *desc = "Equalizer APO file used for this output";
+            } else if (row == OUTPUT_PEQ_ROW_CHOOSE) {
+                *icon = "load";
+                *label = "Choose PEQ file";
+                *desc = EQVITA_PEQ_DIR "/*.txt";
+                *kind = EQ_UI_ROW_ACTION;
+            } else if (row == OUTPUT_PEQ_ROW_INSPECT) {
+                *icon = "advanced";
+                *label = "Inspect / edit PEQ";
+                *desc = "Show this output's ordered operations";
+                *kind = EQ_UI_ROW_NAV;
+            } else if (row == OUTPUT_PEQ_ROW_CLEAR) {
+                *icon = "reset";
+                *label = "Clear this output";
+                *desc = "Bypass this output until another PEQ is assigned";
+                *kind = EQ_UI_ROW_ACTION;
+            } else if (row == OUTPUT_PEQ_ROW_INFO_SECTION) {
+                *label = "Automatic routing";
+                *desc = "Wired is live; app refreshes speaker / Bluetooth";
+                *kind = EQ_UI_ROW_SECTION;
+            } else if (row == OUTPUT_PEQ_ROW_LIVE) {
+                *icon = "speaker";
+                *label = "Live output";
+                *desc = "What the Vita is using now";
+            } else if (row == OUTPUT_PEQ_ROW_SWITCHING) {
+                *icon = "status";
+                *label = "Output profiles";
+                *desc = "Unassigned outputs are bypassed";
             }
             break;
         case SCREEN_SIMPLE:
@@ -1996,12 +2576,47 @@ static void row_text(app_screen_t screen,
                 *label = "Preamp";
                 *desc = "Overall volume before EQ";
                 *kind = EQ_UI_ROW_ADJUST;
-            } else if (row >= ADV_BAND_ROW_BASE && row < ADV_BAND_ROW_BASE + EQ_BANDS) {
-                int band = row - ADV_BAND_ROW_BASE;
+            } else if (advanced_row_is_eq_value(row)) {
+                int index = row - ADV_BAND_ROW_BASE;
                 *icon = "advanced";
-                *label = band_labels[band];
-                *desc = "Left/right fine tune, L/R coarse tune";
-                *kind = EQ_UI_ROW_ADJUST;
+                if (g_control.eq_mode == EQ_MODE_PARAMETRIC) {
+                    static char operation_label[96];
+                    static char operation_desc[128];
+                    const eq_parametric_filter_t *operation = &g_control.parametric_filters[index];
+                    const char *channels = operation->channel_mask == EQ_CHANNEL_LEFT_MASK ? "L" :
+                        operation->channel_mask == EQ_CHANNEL_RIGHT_MASK ? "R" : "L/R";
+
+                    if (operation->type == EQ_FILTER_COPY) {
+                        snprintf(operation_label, sizeof(operation_label), "%02d  Copy", index + 1);
+                        snprintf(operation_desc, sizeof(operation_desc),
+                                 "L=%+.3fL%+.3fR  R=%+.3fL%+.3fR",
+                                 operation->data.copy.matrix[0] / (float)EQ_COPY_COEFFICIENT_SCALE,
+                                 operation->data.copy.matrix[1] / (float)EQ_COPY_COEFFICIENT_SCALE,
+                                 operation->data.copy.matrix[2] / (float)EQ_COPY_COEFFICIENT_SCALE,
+                                 operation->data.copy.matrix[3] / (float)EQ_COPY_COEFFICIENT_SCALE);
+                        *kind = EQ_UI_ROW_READONLY;
+                    } else {
+                        const char *type = operation->type == EQ_FILTER_PEAK ? "PK" :
+                            operation->type == EQ_FILTER_LOW_SHELF ?
+                                (operation->frequency_mode == EQ_FILTER_FREQUENCY_CORNER ? "LS" : "LSC") :
+                            operation->type == EQ_FILTER_HIGH_SHELF ?
+                                (operation->frequency_mode == EQ_FILTER_FREQUENCY_CORNER ? "HS" : "HSC") : "?";
+                        snprintf(operation_label, sizeof(operation_label), "%02d  %s %s  %.3f Hz",
+                                 index + 1, channels, type,
+                                 operation->data.filter.frequency_mHz / 1000.0f);
+                        snprintf(operation_desc, sizeof(operation_desc), "%s %.5f - left/right adjusts gain",
+                                 operation->shape == EQ_FILTER_SHAPE_S ? "S" : "Q",
+                                 operation->data.filter.q_uQ / 1000000.0f);
+                        *kind = operation->type >= EQ_FILTER_PEAK && operation->type <= EQ_FILTER_HIGH_SHELF ?
+                            EQ_UI_ROW_ADJUST : EQ_UI_ROW_READONLY;
+                    }
+                    *label = operation_label;
+                    *desc = operation_desc;
+                } else {
+                    *label = band_labels[index];
+                    *desc = "Left/right fine tune, L/R coarse tune";
+                    *kind = EQ_UI_ROW_ADJUST;
+                }
             } else if (row == ADV_ROW_PRESET_SECTION) {
                 *label = "Preset controls";
                 *desc = "Live edits apply now";
@@ -2070,7 +2685,9 @@ static void row_text(app_screen_t screen,
                 eqvita_media_entry_t *entry = &g_media_listing.entries[row];
                 *icon = entry->kind == EQVITA_MEDIA_ENTRY_FILE ? "file" : "folder";
                 *label = entry->name;
-                *desc = entry->kind == EQVITA_MEDIA_ENTRY_FILE ? "Play this song" :
+                *desc = entry->kind == EQVITA_MEDIA_ENTRY_FILE ?
+                    (g_browser_purpose == BROWSER_PURPOSE_EQUALIZER_APO ?
+                        "Import this Equalizer APO config" : "Play this song") :
                     entry->kind == EQVITA_MEDIA_ENTRY_PARENT ? "Go up one folder" : "Open folder";
                 *kind = entry->kind == EQVITA_MEDIA_ENTRY_FILE ? EQ_UI_ROW_ACTION : EQ_UI_ROW_NAV;
             }
@@ -2094,18 +2711,24 @@ static void row_text(app_screen_t screen,
             } else if (row == SETTINGS_ROW_SCOPE) {
                 *icon = "speaker";
                 *label = "Apply EQ to";
-                *desc = "Speakers only or all outputs";
-                *kind = EQ_UI_ROW_ACTION;
+                *desc = g_route_profiles.enabled_mask != 0 ?
+                    "Managed by Output PEQ profiles" : "Speakers only or all outputs";
+                *kind = g_route_profiles.enabled_mask != 0 ?
+                    EQ_UI_ROW_READONLY : EQ_UI_ROW_ACTION;
             } else if (row == SETTINGS_ROW_HPF) {
                 *icon = "hpf";
                 *label = "Bass guard";
-                *desc = "Reduces deep bass distortion";
-                *kind = EQ_UI_ROW_ACTION;
+                *desc = g_control.eq_mode == EQ_MODE_PARAMETRIC ?
+                    "Disabled while PEQ is active" : "Reduces deep bass distortion";
+                *kind = g_control.eq_mode == EQ_MODE_PARAMETRIC ?
+                    EQ_UI_ROW_READONLY : EQ_UI_ROW_ACTION;
             } else if (row == SETTINGS_ROW_HEADROOM) {
                 *icon = "headroom";
                 *label = "Sound mode";
-                *desc = "Safe, Loud, or Direct";
-                *kind = EQ_UI_ROW_ADJUST;
+                *desc = g_control.eq_mode == EQ_MODE_PARAMETRIC ?
+                    "Locked so the .txt preamp is exact" : "Safe, Loud, Direct, or APO Exact";
+                *kind = g_control.eq_mode == EQ_MODE_PARAMETRIC ?
+                    EQ_UI_ROW_READONLY : EQ_UI_ROW_ADJUST;
             } else if (row == SETTINGS_ROW_ROUTE) {
                 *icon = "route";
                 *label = "Live output";
@@ -2150,7 +2773,7 @@ static void row_text(app_screen_t screen,
             } else if (row == ABOUT_ROW_PRESETS) {
                 *icon = "preset";
                 *label = "Presets";
-                *desc = "Saved sound profiles";
+                *desc = "Save or import APO profiles";
             } else if (row == ABOUT_ROW_SIMPLE) {
                 *icon = "simple";
                 *label = "Simple EQ";
@@ -2158,7 +2781,7 @@ static void row_text(app_screen_t screen,
             } else if (row == ABOUT_ROW_ADVANCED) {
                 *icon = "advanced";
                 *label = "Advanced EQ";
-                *desc = "Fine tune every EQ band";
+                *desc = "10-band or imported parametric EQ";
             } else if (row == ABOUT_ROW_PREAMP) {
                 *icon = "level";
                 *label = "Preamp";
@@ -2173,8 +2796,8 @@ static void row_text(app_screen_t screen,
                 *desc = "EQ only Vita speakers";
             } else if (row == ABOUT_ROW_ALL_OUTPUTS) {
                 *icon = "speaker";
-                *label = "All outputs";
-                *desc = "EQ wired and Bluetooth too";
+                *label = "Parametric EQ";
+                *desc = "Separate speaker, wired, Bluetooth curves";
             } else if (row == ABOUT_ROW_BYPASS) {
                 *icon = "status";
                 *label = "Bypass";
@@ -2189,8 +2812,8 @@ static void row_text(app_screen_t screen,
                 *desc = "Confirm, Back, START, Triangle";
             } else if (row == ABOUT_ROW_DATA_FOLDER) {
                 *icon = "save";
-                *label = "Data folder";
-                *desc = "ur0:data/eqvita";
+                *label = "PEQ config folder";
+                *desc = EQVITA_PEQ_DIR;
             }
             break;
         default:
@@ -2237,7 +2860,7 @@ static void draw_music_player_screen(void)
     format_db(preamp, sizeof(preamp), g_control.preamp_mdB);
     snprintf(preset, sizeof(preset), "Slot %d", g_preset_slot + 1);
     snprintf(eq_state, sizeof(eq_state), "%s", g_control.enabled ? "EQ on" : "EQ off");
-    snprintf(output, sizeof(output), "%s", g_control.speaker_only ? "Speakers" : "All outputs");
+    snprintf(output, sizeof(output), "%s", eq_target_str());
     snprintf(headroom, sizeof(headroom), "%s", headroom_mode_str(eq_control_get_headroom_mode(&g_control)));
 
     eq_ui_music_player_model_t model = {
@@ -2271,6 +2894,10 @@ static void draw_music_browser_screen(void)
     int scroll = g_scroll_top[SCREEN_MUSIC_BROWSER];
     int count = current_row_count();
     int entry_count = 0;
+    char peq_title[64];
+
+    snprintf(peq_title, sizeof(peq_title), "%s PEQ configs",
+             route_str(g_route_profile_edit_route));
 
     if (visible > EQ_UI_MAX_VISIBLE_ROWS) {
         visible = EQ_UI_MAX_VISIBLE_ROWS;
@@ -2295,13 +2922,19 @@ static void draw_music_browser_screen(void)
     }
 
     eq_ui_music_browser_model_t model = {
-        g_media_listing.path,
-        g_selected[SCREEN_MUSIC_BROWSER],
-        entries,
-        entry_count,
-        g_row_bounds,
-        EQ_UI_MAX_VISIBLE_ROWS,
-        &g_row_bound_count
+        .path = g_media_listing.path,
+        .title = g_browser_purpose == BROWSER_PURPOSE_EQUALIZER_APO ?
+            peq_title : "Choose music",
+        .instruction = g_browser_purpose == BROWSER_PURPOSE_EQUALIZER_APO ?
+            "Assign an Equalizer APO .txt to this output" : "Open folders or play a song",
+        .empty_message = g_browser_purpose == BROWSER_PURPOSE_EQUALIZER_APO ?
+            "Put .txt files in ur0:data/eqvita/peq" : "No music found here",
+        .selected_row = g_selected[SCREEN_MUSIC_BROWSER],
+        .entries = entries,
+        .entry_count = entry_count,
+        .bounds = g_row_bounds,
+        .max_bounds = EQ_UI_MAX_VISIBLE_ROWS,
+        .bound_count = &g_row_bound_count
     };
 
     g_row_bound_count = 0;
@@ -2335,9 +2968,17 @@ static void draw_current_rows(void)
             eq_ui_draw_slider(i, row, row == selected, icon, label, desc, value, amount, kind, bounds);
         } else if (g_screen == SCREEN_ADVANCED && row == ADV_ROW_PREAMP) {
             eq_ui_draw_slider(i, row, row == selected, icon, label, desc, value, g_control.preamp_mdB, kind, bounds);
-        } else if (g_screen == SCREEN_ADVANCED && row >= ADV_BAND_ROW_BASE && row < ADV_BAND_ROW_BASE + EQ_BANDS) {
-            int band = row - ADV_BAND_ROW_BASE;
-            eq_ui_draw_slider(i, row, row == selected, icon, label, desc, value, g_control.band_gain_mdB[band], kind, bounds);
+        } else if (g_screen == SCREEN_ADVANCED && advanced_row_is_eq_value(row)) {
+            int index = row - ADV_BAND_ROW_BASE;
+            int32_t amount = g_control.eq_mode == EQ_MODE_PARAMETRIC ?
+                (g_control.parametric_filters[index].type == EQ_FILTER_COPY ? 0 :
+                    g_control.parametric_filters[index].data.filter.gain_mdB) :
+                g_control.band_gain_mdB[index];
+            if (kind == EQ_UI_ROW_ADJUST) {
+                eq_ui_draw_slider(i, row, row == selected, icon, label, desc, value, amount, kind, bounds);
+            } else {
+                eq_ui_draw_row(i, row, row == selected, icon, label, desc, value, kind, bounds);
+            }
         } else {
             eq_ui_draw_row(i, row, row == selected, icon, label, desc, value, kind, bounds);
         }
@@ -2438,6 +3079,11 @@ static void adjust_current(int delta)
                 adjust_preset_slot(delta > 0 ? 1 : -1);
             }
             break;
+        case SCREEN_OUTPUT_PEQ:
+            if (row == OUTPUT_PEQ_ROW_TARGET) {
+                adjust_route_profile_target(delta);
+            }
+            break;
         case SCREEN_SIMPLE:
             if (row == SIMPLE_ROW_PREAMP) adjust_preamp(delta);
             else if (row == SIMPLE_ROW_BASS) apply_simple_eq(g_control.band_gain_mdB[1] + delta, g_control.band_gain_mdB[4], g_control.band_gain_mdB[7], 1);
@@ -2448,8 +3094,12 @@ static void adjust_current(int delta)
         case SCREEN_ADVANCED:
             if (row == ADV_ROW_PREAMP) {
                 adjust_preamp(delta);
-            } else if (row >= ADV_BAND_ROW_BASE && row < ADV_BAND_ROW_BASE + EQ_BANDS) {
-                adjust_band(row - ADV_BAND_ROW_BASE, delta);
+            } else if (advanced_row_is_eq_value(row)) {
+                if (g_control.eq_mode == EQ_MODE_PARAMETRIC) {
+                    adjust_parametric_operation(row - ADV_BAND_ROW_BASE, delta);
+                } else {
+                    adjust_band(row - ADV_BAND_ROW_BASE, delta);
+                }
             } else if (row == ADV_ROW_PRESET_SLOT) {
                 adjust_preset_slot(delta > 0 ? 1 : -1);
             }
@@ -2476,11 +3126,21 @@ static void activate_current(void)
 {
     int row = g_selected[g_screen];
     if (g_screen == SCREEN_HOME) {
-        if (row == 0) {
+        if (row == HOME_ROW_ENABLED) {
             toggle_enabled();
             return;
         }
-        change_screen(home_screen_for_row(row));
+        {
+            app_screen_t destination = home_screen_for_row(row);
+            if (destination == SCREEN_OUTPUT_PEQ) {
+                open_output_peq_screen(SCREEN_HOME);
+                return;
+            }
+            if (is_eq_edit_screen(destination)) {
+                g_eq_return_screen = SCREEN_HOME;
+            }
+            change_screen(destination);
+        }
         return;
     }
 
@@ -2488,9 +3148,26 @@ static void activate_current(void)
         case SCREEN_PRESETS:
             if (row == PRESETS_ROW_STOCK_DEPTH) apply_preset_stock_depth();
             else if (row == PRESETS_ROW_MOD_SWITCH) apply_preset_mod_switch();
+            else if (row == PRESETS_ROW_OUTPUT_PEQ) open_output_peq_screen(SCREEN_PRESETS);
             else if (row == PRESETS_ROW_SAVE) save_preset_with_message();
             else if (row == PRESETS_ROW_LOAD) load_preset_with_message();
             else if (row == PRESETS_ROW_RESET) reset_defaults();
+            break;
+        case SCREEN_OUTPUT_PEQ:
+            if (row == OUTPUT_PEQ_ROW_CHOOSE) {
+                g_peq_browser_return_screen = SCREEN_OUTPUT_PEQ;
+                open_peq_browser_root();
+            } else if (row == OUTPUT_PEQ_ROW_INSPECT) {
+                if (eq_route_profile_bank_has_route(&g_route_profiles,
+                                                     g_route_profile_edit_route)) {
+                    g_eq_return_screen = SCREEN_OUTPUT_PEQ;
+                    change_screen(SCREEN_ADVANCED);
+                } else {
+                    set_message("Assign a PEQ to this output first");
+                }
+            } else if (row == OUTPUT_PEQ_ROW_CLEAR) {
+                clear_route_profile();
+            }
             break;
         case SCREEN_SIMPLE:
             if (row == SIMPLE_ROW_SAVE_CURRENT) save_preset_with_message();
@@ -2541,10 +3218,18 @@ static void activate_current(void)
                     break;
                 }
                 if (entry->kind == EQVITA_MEDIA_ENTRY_FILE) {
-                    media_player_play_selected(next_path);
-                    change_screen(SCREEN_MUSIC);
+                    if (g_browser_purpose == BROWSER_PURPOSE_EQUALIZER_APO) {
+                        import_equalizer_apo_file(next_path);
+                    } else {
+                        media_player_play_selected(next_path);
+                        change_screen(SCREEN_MUSIC);
+                    }
                 } else {
-                    open_music_browser_path(next_path);
+                    if (g_browser_purpose == BROWSER_PURPOSE_EQUALIZER_APO) {
+                        open_apo_browser_path(next_path);
+                    } else {
+                        open_music_browser_path(next_path);
+                    }
                 }
             }
             break;
@@ -2710,8 +3395,18 @@ int main(void)
 
     g_log_run_id = sceKernelGetProcessTimeLow();
     app_log("---- run begin run_id=%08x ----", g_log_run_id);
+    (void)prepare_peq_library();
 
     eqvita_app_state_init(&g_app_state);
+    eq_route_profile_bank_init(&g_route_profiles);
+    memset(g_route_profile_sources, 0, sizeof(g_route_profile_sources));
+    if (eqvita_load_route_profiles(EQVITA_DATA_DIR,
+                                    &g_route_profiles,
+                                    g_route_profile_sources) < 0) {
+        eq_route_profile_bank_init(&g_route_profiles);
+        memset(g_route_profile_sources, 0, sizeof(g_route_profile_sources));
+    }
+    g_route_profile_edit_route = g_route_profiles.selected_route;
     eqvita_media_player_init(&g_media_player);
     g_media_status = eqvita_media_player_status(&g_media_player);
     browser_async_init();
@@ -2727,6 +3422,7 @@ int main(void)
     sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
     g_touch_panel_ready = (sceTouchGetPanelInfo(SCE_TOUCH_PORT_FRONT, &g_touch_panel) >= 0);
 
+    memset(&g_version, 0, sizeof(g_version));
     EqGetVersion(&g_version);
     g_control.route_hint = (uint8_t)detect_route_user();
     g_plugin_compatible = (g_version.major == EQ_VERSION_MAJOR && g_version.minor == EQ_VERSION_MINOR);
@@ -2743,6 +3439,27 @@ int main(void)
                                             &startup_source) < 0) {
             eq_control_init_defaults(&startup_control);
             startup_slot = 0;
+        }
+        if (g_route_profiles.enabled_mask != 0) {
+            uint8_t selected_route = g_route_profiles.selected_route;
+            int selected_index;
+            uint8_t master_enabled = startup_control.enabled;
+
+            if (!eq_route_profile_bank_has_route(&g_route_profiles, selected_route)) {
+                for (uint8_t route = EQ_ROUTE_SPEAKER; route <= EQ_ROUTE_BLUETOOTH; ++route) {
+                    if (eq_route_profile_bank_has_route(&g_route_profiles, route)) {
+                        selected_route = route;
+                        break;
+                    }
+                }
+            }
+            selected_index = eq_route_profile_index(selected_route);
+            if (selected_index >= 0) {
+                startup_control = g_route_profiles.profiles[selected_index];
+                startup_control.enabled = master_enabled;
+                g_route_profile_edit_route = selected_route;
+                g_route_profiles.selected_route = selected_route;
+            }
         }
         eqvita_app_state_set_preset_slot(&g_app_state, startup_slot);
         if (apply_control_candidate(&startup_control, 0) < 0) {

@@ -4,7 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef EQVITA_HOST_TESTS
+#ifdef EQVITA_HOST_TESTS
+#include <dirent.h>
+#include <sys/stat.h>
+#else
 #include <psp2/io/dirent.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/threadmgr.h>
@@ -50,7 +53,16 @@ static const char *file_ext(const char *path)
 
 int eqvita_media_browser_is_supported_file(const char *path)
 {
+    return eqvita_media_browser_is_supported_file_for_filter(path, EQVITA_MEDIA_FILTER_AUDIO);
+}
+
+int eqvita_media_browser_is_supported_file_for_filter(const char *path,
+                                                       eqvita_media_file_filter_t filter)
+{
     const char *ext = file_ext(path);
+    if (filter == EQVITA_MEDIA_FILTER_EQUALIZER_APO) {
+        return ext_equals(ext, "txt");
+    }
     return ext_equals(ext, "ogg") ||
            ext_equals(ext, "mp3") ||
            ext_equals(ext, "wav");
@@ -159,6 +171,60 @@ int eqvita_media_browser_is_root_path(const char *path)
     return 1;
 }
 
+static size_t normalized_path_length(const char *path)
+{
+    size_t len;
+
+    if (!path) {
+        return 0;
+    }
+    len = strlen(path);
+    while (len > 0 && (path[len - 1] == '/' || path[len - 1] == '\\')) {
+        len--;
+    }
+    return len;
+}
+
+static int path_char_equal(char a, char b)
+{
+    if ((a == '/' || a == '\\') && (b == '/' || b == '\\')) {
+        return 1;
+    }
+    return a == b;
+}
+
+int eqvita_media_browser_paths_equal(const char *a, const char *b)
+{
+    size_t a_len = normalized_path_length(a);
+    size_t b_len = normalized_path_length(b);
+
+    if (!a || !b || a_len != b_len) {
+        return 0;
+    }
+    for (size_t i = 0; i < a_len; ++i) {
+        if (!path_char_equal(a[i], b[i])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int eqvita_media_browser_path_is_within(const char *path, const char *root)
+{
+    size_t path_len = normalized_path_length(path);
+    size_t root_len = normalized_path_length(root);
+
+    if (!path || !root || root_len == 0 || path_len < root_len) {
+        return 0;
+    }
+    for (size_t i = 0; i < root_len; ++i) {
+        if (!path_char_equal(path[i], root[i])) {
+            return 0;
+        }
+    }
+    return path_len == root_len || path[root_len] == '/' || path[root_len] == '\\';
+}
+
 static int ascii_strcasecmp_local(const char *a, const char *b)
 {
     while (*a && *b) {
@@ -240,6 +306,7 @@ static int is_dir(const SceIoDirent *dir)
 
 int eqvita_media_browser_read_roots(eqvita_media_listing_t *listing)
 {
+#ifndef EQVITA_HOST_TESTS
     static const char *roots[] = {
         "ux0:",
         "uma0:",
@@ -247,6 +314,7 @@ int eqvita_media_browser_read_roots(eqvita_media_listing_t *listing)
         "xmc0:",
         "ur0:"
     };
+#endif
     eqvita_media_listing_t *next;
 
     if (!listing) {
@@ -284,10 +352,65 @@ int eqvita_media_browser_read_roots(eqvita_media_listing_t *listing)
 
 int eqvita_media_browser_read_dir(eqvita_media_listing_t *listing, const char *path)
 {
+    return eqvita_media_browser_read_dir_filtered(listing, path, EQVITA_MEDIA_FILTER_AUDIO);
+}
+
+int eqvita_media_browser_read_dir_filtered(eqvita_media_listing_t *listing,
+                                           const char *path,
+                                           eqvita_media_file_filter_t filter)
+{
 #ifdef EQVITA_HOST_TESTS
-    (void)listing;
-    (void)path;
-    return -1;
+    DIR *fd;
+    struct dirent *dir;
+    struct stat st;
+    char child[EQVITA_MEDIA_MAX_PATH];
+    char parent[EQVITA_MEDIA_MAX_PATH];
+    eqvita_media_listing_t *next;
+    int path_len;
+
+    if (!listing || !path || !*path) {
+        return -1;
+    }
+    fd = opendir(path);
+    if (!fd) {
+        return -1;
+    }
+    next = (eqvita_media_listing_t *)malloc(sizeof(*next));
+    if (!next) {
+        closedir(fd);
+        return -1;
+    }
+    memset(next, 0, sizeof(*next));
+    path_len = snprintf(next->path, sizeof(next->path), "%s", path);
+    if (path_len < 0 || path_len >= (int)sizeof(next->path)) {
+        closedir(fd);
+        free(next);
+        return -1;
+    }
+    if (eqvita_media_browser_parent_path(parent, sizeof(parent), path) == 0) {
+        add_entry(next, EQVITA_MEDIA_ENTRY_PARENT, "..", parent);
+    }
+    while ((dir = readdir(fd)) != NULL && next->count < EQVITA_MEDIA_MAX_ENTRIES) {
+        if (strcmp(dir->d_name, ".") == 0 || strcmp(dir->d_name, "..") == 0 ||
+            eqvita_media_browser_join_path(child, sizeof(child), path, dir->d_name) < 0 ||
+            stat(child, &st) != 0) {
+            continue;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            size_t child_len = strlen(child);
+            if (child_len + 1 < sizeof(child) && child[child_len - 1] != '/') {
+                child[child_len] = '/';
+                child[child_len + 1] = '\0';
+            }
+            add_entry(next, EQVITA_MEDIA_ENTRY_DIRECTORY, dir->d_name, child);
+        } else if (eqvita_media_browser_is_supported_file_for_filter(dir->d_name, filter)) {
+            add_entry(next, EQVITA_MEDIA_ENTRY_FILE, dir->d_name, child);
+        }
+    }
+    closedir(fd);
+    *listing = *next;
+    free(next);
+    return listing->count;
 #else
     SceUID fd;
     SceIoDirent dir;
@@ -347,7 +470,7 @@ int eqvita_media_browser_read_dir(eqvita_media_listing_t *listing, const char *p
                 child[child_len + 1] = '\0';
             }
             add_entry(next, EQVITA_MEDIA_ENTRY_DIRECTORY, dir.d_name, child);
-        } else if (eqvita_media_browser_is_supported_file(dir.d_name)) {
+        } else if (eqvita_media_browser_is_supported_file_for_filter(dir.d_name, filter)) {
             add_entry(next, EQVITA_MEDIA_ENTRY_FILE, dir.d_name, child);
         }
         read_entries++;
@@ -362,4 +485,27 @@ int eqvita_media_browser_read_dir(eqvita_media_listing_t *listing, const char *p
     free(next);
     return listing->count;
 #endif
+}
+
+int eqvita_media_browser_read_dir_filtered_at_root(eqvita_media_listing_t *listing,
+                                                   const char *path,
+                                                   eqvita_media_file_filter_t filter,
+                                                   const char *root)
+{
+    int result;
+
+    if (!root || !eqvita_media_browser_path_is_within(path, root)) {
+        return -1;
+    }
+    result = eqvita_media_browser_read_dir_filtered(listing, path, filter);
+    if (result < 0) {
+        return result;
+    }
+    if (eqvita_media_browser_paths_equal(path, root) && listing->count > 0 &&
+        listing->entries[0].kind == EQVITA_MEDIA_ENTRY_PARENT) {
+        memmove(&listing->entries[0], &listing->entries[1],
+                (size_t)(listing->count - 1) * sizeof(listing->entries[0]));
+        listing->count--;
+    }
+    return listing->count;
 }

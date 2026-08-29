@@ -44,6 +44,9 @@ static SceUID g_audio_mutex = -1;
 static eq_audio_port_registry_t g_ports;
 static eq_control_t g_control;
 static volatile uint32_t g_control_seq;
+static eq_route_profile_bank_t g_route_profiles;
+static eq_route_profile_bank_t g_route_profiles_staging;
+static volatile uint32_t g_route_profile_seq;
 static eq_status_t g_status;
 static eq_diag_snapshot_t g_diag_pending;
 static uint32_t g_diag_ring_start;
@@ -140,6 +143,18 @@ static void publish_control_locked(const eq_control_t *control) {
     __sync_add_and_fetch(&g_control_seq, 1);
 }
 
+static void publish_route_profiles_locked(const eq_route_profile_bank_t *bank) {
+    if (!bank) {
+        return;
+    }
+
+    __sync_add_and_fetch(&g_route_profile_seq, 1);
+    __sync_synchronize();
+    g_route_profiles = *bank;
+    __sync_synchronize();
+    __sync_add_and_fetch(&g_route_profile_seq, 1);
+}
+
 static int copy_control_snapshot(eq_control_t *out) {
     if (!out) {
         return -1;
@@ -147,15 +162,52 @@ static int copy_control_snapshot(eq_control_t *out) {
 
     for (int attempt = 0; attempt < 3; ++attempt) {
         uint32_t before = g_control_seq;
-        eq_control_t copy;
         __sync_synchronize();
         if (before & 1u) {
             continue;
         }
-        copy = g_control;
+        *out = g_control;
         __sync_synchronize();
-        if (before == g_control_seq && !(before & 1u) && eq_control_is_compatible(&copy)) {
-            *out = copy;
+        if (before == g_control_seq && !(before & 1u) && eq_control_is_compatible(out)) {
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
+static int copy_route_profile_snapshot(eq_route_t route,
+                                       eq_control_t *out,
+                                       int *out_bank_active,
+                                       int *out_profile_active) {
+    uint8_t route_bit = eq_route_profile_bit((uint8_t)route);
+    int route_index = eq_route_profile_index((uint8_t)route);
+
+    if (!out || !out_bank_active || !out_profile_active || !route_bit || route_index < 0) {
+        return -1;
+    }
+
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        uint32_t before = g_route_profile_seq;
+        uint8_t enabled_mask;
+        uint32_t dirty_counter;
+
+        __sync_synchronize();
+        if (before & 1u) {
+            continue;
+        }
+        enabled_mask = g_route_profiles.enabled_mask;
+        dirty_counter = g_route_profiles.dirty_counter;
+        *out_bank_active = enabled_mask != 0;
+        *out_profile_active = (enabled_mask & route_bit) != 0;
+        if (*out_profile_active) {
+            *out = g_route_profiles.profiles[route_index];
+        }
+        __sync_synchronize();
+        if (before == g_route_profile_seq && !(before & 1u)) {
+            if (*out_profile_active) {
+                out->dirty_counter = dirty_counter;
+            }
             return 0;
         }
     }
@@ -165,16 +217,8 @@ static int copy_control_snapshot(eq_control_t *out) {
 
 static int should_probe_wired_headphone(const eq_control_t *control)
 {
-    uint8_t route_hint;
-
-    if (!control) {
-        return 1;
-    }
-
-    route_hint = control->route_hint;
-    return route_hint == EQ_ROUTE_UNKNOWN ||
-           route_hint == EQ_ROUTE_SPEAKER ||
-           route_hint > EQ_ROUTE_BLUETOOTH;
+    (void)control;
+    return 1;
 }
 
 static int should_run_wired_headphone_probe(const eq_control_t *control)
@@ -401,6 +445,7 @@ static void diag_emit_lifecycle_now(uint32_t type, int port, uint32_t generation
 #define BOOT_STATE_PATH "ur0:data/eqvita/boot.eqbs"
 #define PRESET_PATH "ur0:data/eqvita/preset0.eqvp"
 #define LEGACY_PRESET_PATH "ur0:data/eqvita/preset0.bin"
+#define ROUTE_PROFILE_PATH "ur0:data/eqvita/" EQ_ROUTE_PROFILE_FILE_NAME
 
 static int kernel_read_exact(SceUID fd, void *data, SceSize expected_size) {
     SceOff size;
@@ -423,11 +468,19 @@ static int kernel_read_exact(SceUID fd, void *data, SceSize expected_size) {
 static int load_boot_state_kernel(void) {
     SceUID fd = ksceIoOpen(BOOT_STATE_PATH, SCE_O_RDONLY, 0);
     if (fd >= 0) {
-        eq_boot_state_file_t state;
-        eq_control_t loaded;
+        static eq_boot_state_file_t state;
+        static eq_legacy_boot_state_file_v1_t legacy_state;
+        static eq_control_t loaded;
         int r = kernel_read_exact(fd, &state, sizeof(state));
-        ksceIoClose(fd);
         if (r == 0 && eq_boot_state_extract_control(&state, &loaded) == 0) {
+            ksceIoClose(fd);
+            g_control = loaded;
+            g_control.dirty_counter = eq_control_next_dirty_counter(g_control.dirty_counter);
+            return 0;
+        }
+        r = kernel_read_exact(fd, &legacy_state, sizeof(legacy_state));
+        ksceIoClose(fd);
+        if (r == 0 && eq_legacy_boot_state_extract_control(&legacy_state, &loaded) == 0) {
             g_control = loaded;
             g_control.dirty_counter = eq_control_next_dirty_counter(g_control.dirty_counter);
             return 0;
@@ -447,11 +500,21 @@ static void load_preset_kernel(void) {
 
     fd = ksceIoOpen(PRESET_PATH, SCE_O_RDONLY, 0);
     if (fd >= 0) {
-        eq_preset_file_t preset;
-        eq_control_t loaded;
+        static eq_preset_file_t preset;
+        static eq_legacy_preset_file_v2_t legacy_preset;
+        static eq_control_t loaded;
         int r = kernel_read_exact(fd, &preset, sizeof(preset));
-        ksceIoClose(fd);
         if (r == 0 && eq_preset_extract_control(&preset, &loaded) == 0) {
+            ksceIoClose(fd);
+            primary_status = EQ_PRESET_PRIMARY_VALID;
+            eq_control_prepare_for_boot(&loaded);
+            g_control = loaded;
+            g_control.dirty_counter = eq_control_next_dirty_counter(g_control.dirty_counter);
+            return;
+        }
+        r = kernel_read_exact(fd, &legacy_preset, sizeof(legacy_preset));
+        ksceIoClose(fd);
+        if (r == 0 && eq_legacy_preset_extract_control(&legacy_preset, &loaded) == 0) {
             primary_status = EQ_PRESET_PRIMARY_VALID;
             eq_control_prepare_for_boot(&loaded);
             g_control = loaded;
@@ -467,10 +530,11 @@ static void load_preset_kernel(void) {
 
     fd = ksceIoOpen(LEGACY_PRESET_PATH, SCE_O_RDONLY, 0);
     if (fd >= 0) {
-        eq_control_t tmp;
-        int r = kernel_read_exact(fd, &tmp, sizeof(tmp));
+        static eq_legacy_control_v1_14_t legacy;
+        static eq_control_t tmp;
+        int r = kernel_read_exact(fd, &legacy, sizeof(legacy));
         ksceIoClose(fd);
-        if (r == 0 && eq_control_validate(&tmp) == 0) {
+        if (r == 0 && eq_control_import_legacy(&tmp, &legacy) == 0) {
             eq_control_prepare_for_boot(&tmp);
             g_control = tmp;
             g_control.dirty_counter = eq_control_next_dirty_counter(g_control.dirty_counter);
@@ -478,13 +542,30 @@ static void load_preset_kernel(void) {
     }
 }
 
+static void load_route_profiles_kernel(void) {
+    static eq_route_profile_file_t file;
+    SceUID fd = ksceIoOpen(ROUTE_PROFILE_PATH, SCE_O_RDONLY, 0);
+
+    if (fd < 0) {
+        return;
+    }
+    if (kernel_read_exact(fd, &file, sizeof(file)) == 0) {
+        if (eq_route_profile_file_extract(&file, &g_route_profiles_staging, NULL) == 0) {
+            g_route_profiles = g_route_profiles_staging;
+        }
+    }
+    ksceIoClose(fd);
+}
+
 static void set_defaults(void) {
     memset(&g_status, 0, sizeof(g_status));
     memset(&g_diag_pending, 0, sizeof(g_diag_pending));
     eq_control_init_defaults(&g_control);
+    eq_route_profile_bank_init(&g_route_profiles);
     
     // Try to load preset
     load_preset_kernel();
+    load_route_profiles_kernel();
 
     g_status.sample_rate = 48000;
     g_status.route = EQ_ROUTE_UNKNOWN;
@@ -498,6 +579,7 @@ static void set_defaults(void) {
     g_wired_headphone_probe_countdown = 0;
     g_cached_wired_headphones_connected = 0;
     g_control_seq = 2;
+    g_route_profile_seq = 2;
 }
 
 // No shared mem block needed; app uses syscalls to set/get control and status.
@@ -525,12 +607,21 @@ static int update_dsp_if_needed(eq_audio_tracked_port_t *port, const eq_control_
 
         int32_t effective_preamp = eq_control_effective_preamp_mdB(control, band_mdB);
 
-        eq_dsp_set_targets(&port->dsp, port->config.freq, band_mdB, effective_preamp, hpf_enabled);
+        if (control->eq_mode == EQ_MODE_PARAMETRIC) {
+            eq_dsp_set_parametric_targets(&port->dsp,
+                                          port->config.freq,
+                                          control->parametric_filters,
+                                          control->parametric_filter_count,
+                                          effective_preamp,
+                                          hpf_enabled);
+        } else {
+            eq_dsp_set_targets(&port->dsp, port->config.freq, band_mdB, effective_preamp, hpf_enabled);
+        }
         port->last_dirty = dirty;
         port->last_route = (uint8_t)route;
         port->last_preamp_mdB = control->preamp_mdB;
         port->last_effective_preamp_mdB = effective_preamp;
-        port->last_max_boost_mdB = eq_control_max_positive_band_mdB(band_mdB);
+        port->last_max_boost_mdB = eq_control_max_positive_eq_mdB(control, band_mdB);
         port->last_headroom_mode = eq_control_get_headroom_mode(control);
         port->last_hpf_enabled = (uint8_t)hpf_enabled;
         return 1;
@@ -624,6 +715,10 @@ static int sceAudioOutOutput_hook(int port, const void *buf) {
     uint32_t route_last_counter = 0;
     uint32_t route_stale_buffers = 0;
     int control_ready = 0;
+    int route_profile_snapshot = 0;
+    int route_bank_active = 0;
+    int route_profile_active = 0;
+    uint8_t master_enabled = 0;
     int recover_after_output = 0;
     int retry_bypass = 0;
 #if EQVITA_AUDIO_DIAGNOSTICS
@@ -726,17 +821,33 @@ static int sceAudioOutOutput_hook(int port, const void *buf) {
                 reason = EQ_BYPASS_AUDIO_BUSY;
             } else if (!eq_audio_port_can_process(&processing_config, EQ_AUDIO_SCRATCH_MAX_FRAMES)) {
                 reason = (frames > EQ_AUDIO_SCRATCH_MAX_FRAMES) ? EQ_BYPASS_BUFFER_TOO_LARGE : EQ_BYPASS_UNSUPPORTED_FORMAT;
-            } else if (!control.enabled) {
-                reason = EQ_BYPASS_DISABLED;
             } else {
                 processing_bytes = (size_t)frames * channels * sizeof(int16_t);
+                master_enabled = control.enabled;
 
                 stage_start_us = ksceKernelGetSystemTimeLow();
                 route = detect_route(&control, route_last_counter, route_stale_buffers);
+                if (route != EQ_ROUTE_UNKNOWN) {
+                    uint8_t route_hint = control.route_hint;
+                    route_profile_snapshot = copy_route_profile_snapshot(route,
+                                                                         &control,
+                                                                         &route_bank_active,
+                                                                         &route_profile_active);
+                    if (route_profile_snapshot == 0 && route_profile_active) {
+                        control.enabled = master_enabled;
+                        control.route_hint = route_hint;
+                    }
+                }
                 stage_route_us = ksceKernelGetSystemTimeLow() - stage_start_us;
                 if (route == EQ_ROUTE_UNKNOWN) {
                     reason = EQ_BYPASS_UNKNOWN_ROUTE;
-                } else if (control.speaker_only && route != EQ_ROUTE_SPEAKER) {
+                } else if (route_profile_snapshot < 0) {
+                    reason = EQ_BYPASS_AUDIO_BUSY;
+                } else if (!master_enabled) {
+                    reason = EQ_BYPASS_DISABLED;
+                } else if (route_bank_active && !route_profile_active) {
+                    reason = EQ_BYPASS_NO_ROUTE_PROFILE;
+                } else if (!route_bank_active && control.speaker_only && route != EQ_ROUTE_SPEAKER) {
                     reason = EQ_BYPASS_SPEAKER_ONLY;
                 } else {
                     reason = EQ_BYPASS_NONE;
@@ -759,7 +870,17 @@ static int sceAudioOutOutput_hook(int port, const void *buf) {
 #endif
 
                         stage_start_us = ksceKernelGetSystemTimeLow();
-                        eq_dsp_apply_to(&processing_port->dsp, processing_port->original, processing_port->scratch, frames, channels, &clip_count, &peak_l, &peak_r);
+                        eq_dsp_apply_to(&processing_port->dsp,
+                                        processing_port->original,
+                                        processing_port->scratch,
+                                        frames,
+                                        channels,
+                                        eq_control_get_headroom_mode(&control) == EQ_HEADROOM_EXACT
+                                            ? EQ_DSP_OUTPUT_HARD_CLIP
+                                            : EQ_DSP_OUTPUT_SOFT_LIMIT,
+                                        &clip_count,
+                                        &peak_l,
+                                        &peak_r);
                         stage_dsp_us = ksceKernelGetSystemTimeLow() - stage_start_us;
 
                         smoothing = (processing_port->dsp.smooth_remaining > 0);
@@ -1088,10 +1209,40 @@ int EqSetControl(const eq_control_t *user_ctrl) {
         event.headroom_mode = eq_control_get_headroom_mode(&tmp);
         event.hpf_enabled = eq_control_hpf_enabled(&tmp);
         event.preamp_mdB = tmp.preamp_mdB;
-        event.max_boost_mdB = eq_control_max_positive_band_mdB(tmp.band_gain_mdB);
+        event.max_boost_mdB = eq_control_max_positive_eq_mdB(&tmp, tmp.band_gain_mdB);
         event.effective_preamp_mdB = eq_control_effective_preamp_mdB(&tmp, tmp.band_gain_mdB);
         diag_emit_locked(&event);
     }
+    unlock_state();
+    hook_leave();
+    return 0;
+}
+
+int EqSetRouteProfiles(const eq_route_profile_bank_t *user_bank) {
+    if (!user_bank) { return -1; }
+    if (!hook_enter()) {
+        hook_leave();
+        return -3;
+    }
+    if (lock_state() < 0) {
+        hook_leave();
+        return -3;
+    }
+    if (ksceKernelCopyFromUser(&g_route_profiles_staging,
+                               user_bank,
+                               sizeof(g_route_profiles_staging)) < 0) {
+        unlock_state();
+        hook_leave();
+        return -1;
+    }
+    if (eq_route_profile_bank_validate(&g_route_profiles_staging) < 0) {
+        unlock_state();
+        hook_leave();
+        return -2;
+    }
+    g_route_profiles_staging.dirty_counter =
+        eq_control_next_dirty_counter(g_route_profiles.dirty_counter);
+    publish_route_profiles_locked(&g_route_profiles_staging);
     unlock_state();
     hook_leave();
     return 0;
@@ -1238,7 +1389,6 @@ int module_start(SceSize argc, const void *argv) {
         (void)cleanup();
         return SCE_KERNEL_START_FAILED;
     }
-
     g_hook_id_output = taiHookFunctionExportForKernel(KERNEL_PID, &g_hook_output, "SceAudio", 0x438BB957, 0x02DB3F5F, sceAudioOutOutput_hook);
     g_hook_id_open = taiHookFunctionExportForKernel(KERNEL_PID, &g_hook_open, "SceAudio", 0x438BB957, 0x5BC341E4, sceAudioOutOpenPort_hook);
     g_hook_id_set_config = taiHookFunctionExportForKernel(KERNEL_PID, &g_hook_set_config, "SceAudio", 0x438BB957, 0xB8BA0D07, sceAudioOutSetConfig_hook);

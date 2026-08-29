@@ -1,0 +1,13 @@
+# Synthetic parser fixture: comments, optional numbering, and shelf variants.
+Preamp: -9 dB
+Filter: ON LS Fc 60 Hz Gain 5 dB
+# Filter: ON PK Fc 90 Hz Gain 20 dB Q 1
+Filter 1: ON PK Fc 150 Hz Gain -2 dB Q 0.8
+Filter 2: ON PK Fc 300 Hz Gain -3 dB Q 0.9
+Filter: ON PK Fc 1000 Hz Gain 2 dB Q 1.2
+Filter: ON PK Fc 2500 Hz Gain -2.5 dB Q 2.5
+Filter: ON PK Fc 6000 Hz Gain -4 dB Q 3
+Filter: ON HS Fc 10000 Hz Gain 4 dB
+Filter 8: ON HSC Fc 12000 Hz Gain -3 dB Q 0.707
+Filter: ON LSC Fc 90 Hz Gain 6 dB Q 0.6
+Filter 10: ON PK Fc 16000 Hz Gain -5 dB Q 10
