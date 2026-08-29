@@ -1452,12 +1452,42 @@ static void test_dsp_hot_biquad_helper_avoids_finite_checks(void)
     free(source);
 }
 
+static void test_dsp_audio_callback_avoids_runtime_recovery_scans(void)
+{
+    char path[512];
+    char *source;
+    char *apply_start;
+    char *apply_end;
+    char *steady_guard;
+
+    snprintf(path, sizeof(path), "%s/plugin/dsp.c", EQVITA_SOURCE_DIR);
+    source = read_file(path);
+
+    apply_start = strstr(source, "void eq_dsp_apply_to");
+    ASSERT_TRUE(apply_start != NULL);
+    apply_end = strstr(apply_start + 1, "void eq_dsp_apply(");
+    ASSERT_TRUE(apply_end != NULL);
+    steady_guard = strstr(apply_start, "if (state->smooth_remaining == 0)");
+    ASSERT_TRUE(steady_guard != NULL);
+    ASSERT_TRUE(steady_guard < apply_end);
+
+    ASSERT_TRUE(!range_contains(apply_start, apply_end, "sanitize_preamp_state("));
+    ASSERT_TRUE(!range_contains(apply_start, apply_end, "sanitize_smoothing_state("));
+    ASSERT_TRUE(!range_contains(apply_start, apply_end, "sanitize_biquad_state("));
+    ASSERT_TRUE(!range_contains(apply_start, apply_end, "sanitize_delay_state("));
+    ASSERT_TRUE(!range_contains(apply_start, steady_guard, "rebuild_active_stereo_coefficients("));
+
+    free(source);
+}
+
 static void test_dsp_has_cortex_a9_neon_kernel_with_inline_vcvtr(void)
 {
     char path[512];
     char *source;
     char *kernel_start;
     char *kernel_end;
+    char *hard_start;
+    char *hard_end;
     char *apply_start;
     char *apply_end;
     char *last_limit;
@@ -1470,16 +1500,22 @@ static void test_dsp_has_cortex_a9_neon_kernel_with_inline_vcvtr(void)
 
     ASSERT_TRUE(strstr(source, "#if defined(__ARM_NEON)") != NULL);
     ASSERT_TRUE(strstr(source, "__aarch64__") == NULL);
-    kernel_start = strstr(source, "static void process_stereo_steady_neon");
+    kernel_start = strstr(source, "process_stereo_steady_neon_core");
     ASSERT_TRUE(kernel_start != NULL);
-    kernel_end = strstr(kernel_start + 1, "static void process_generic_steady");
+    kernel_end = strstr(kernel_start + 1, "process_stereo_steady_neon_hard_clip");
     ASSERT_TRUE(kernel_end != NULL);
+    hard_start = kernel_end;
+    hard_end = strstr(hard_start + 1, "process_stereo_steady_neon_soft_limit");
+    ASSERT_TRUE(hard_end != NULL);
     ASSERT_TRUE(range_contains(kernel_start, kernel_end, "while (frames >= 4u)"));
     ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmla_f32"));
-    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vcgt_f32"));
-    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vclt_f32"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vceqq_f32"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmvnq_u32"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vmaxq_f32"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vminq_f32"));
+    ASSERT_TRUE(range_contains(kernel_start, kernel_end, "clip_count"));
     ASSERT_TRUE(range_contains(kernel_start, kernel_end, "vcvtr.s32.f32"));
-    last_limit = strstr(kernel_start, "EQ_NEON_LIMIT_PAIR(x3)");
+    last_limit = strstr(kernel_start, "EQ_NEON_HARD_CLIP_FOUR(x0, x1, x2, x3)");
     first_round = strstr(kernel_start, "EQ_VFP_ROUND_PAIR(x0, rounded0)");
     last_round = strstr(kernel_start, "EQ_VFP_ROUND_PAIR(x3, rounded3)");
     first_narrow = strstr(kernel_start, "packed0 = vmovn_s32");
@@ -1491,6 +1527,8 @@ static void test_dsp_has_cortex_a9_neon_kernel_with_inline_vcvtr(void)
     ASSERT_TRUE(first_round < last_round);
     ASSERT_TRUE(last_round < first_narrow);
     ASSERT_TRUE(!range_contains(kernel_start, kernel_end, "vfma"));
+    ASSERT_TRUE(range_contains(hard_start, hard_end, "process_stereo_steady_neon_core"));
+    ASSERT_TRUE(range_contains(hard_start, hard_end, "EQ_DSP_OUTPUT_HARD_CLIP"));
     apply_start = strstr(source, "void eq_dsp_apply_to");
     ASSERT_TRUE(apply_start != NULL);
     apply_end = strstr(apply_start + 1, "void eq_dsp_apply(");
@@ -1699,6 +1737,7 @@ int main(void)
     test_dsp_state_caches_active_band_indexes();
     test_dsp_apply_has_stereo_steady_state_fast_path();
     test_dsp_hot_biquad_helper_avoids_finite_checks();
+    test_dsp_audio_callback_avoids_runtime_recovery_scans();
     test_dsp_has_cortex_a9_neon_kernel_with_inline_vcvtr();
     test_speaker_retarget_honors_hpf_control_before_folding_31hz();
     test_output_hook_records_slowest_block_context();
